@@ -31,7 +31,7 @@ class NightWriterCLI:
             formatter_class=argparse.RawDescriptionHelpFormatter,
             epilog="""
 Examples:
-  # Run with default settings
+  # Run with default settings (single session with manual terminal selection)
   python night_writer_cli.py
 
   # Run with custom tasks file and terminal
@@ -42,9 +42,6 @@ Examples:
 
   # Run with custom limits
   python night_writer_cli.py --max-tasks 5 --session-hours 3
-
-  # Run in test mode (single session)
-  python night_writer_cli.py --test-mode
 
   # Show configuration
   python night_writer_cli.py --show-config
@@ -68,8 +65,8 @@ Examples:
         parser.add_argument(
             "--connection-mode", "-conn",
             choices=[m.value for m in TerminalConnectionMode],
-            default="auto_detect",
-            help="Terminal connection mode: new_window, existing_window, auto_detect [default: auto_detect]"
+            default="existing_window",
+            help="Terminal connection mode: new_window, existing_window, auto_detect [default: existing_window]"
         )
         
         parser.add_argument(
@@ -113,12 +110,7 @@ Examples:
             help="Inactivity timeout in seconds [default: 600]"
         )
         
-        # Operation modes
-        parser.add_argument(
-            "--test-mode",
-            action="store_true",
-            help="Run in test mode (single session, no continuous loop)"
-        )
+        # Operation modes (removed test-mode since single session is now default)
         
         parser.add_argument(
             "--show-config",
@@ -225,10 +217,11 @@ Examples:
             print(f"Error validating tasks file: {e}")
             return False
     
-    def _run_test_mode(self, config: Configuration) -> bool:
-        """Run in test mode (single session)"""
-        print("Running in test mode...")
-        print("This will execute one session and then exit.")
+    
+    def _run_single_session(self, config: Configuration) -> bool:
+        """Run a single session with manual terminal selection"""
+        print("Starting Night Writer...")
+        print("You will be prompted to select a terminal window.")
         print()
         
         system = TerminalAutomationSystem(config)
@@ -238,43 +231,17 @@ Examples:
             return False
         
         print(f"Loaded {len(system.tasks)} tasks")
-        print("Starting test session...")
+        print("Starting session...")
         
-        # Mock the scheduler to start immediately
-        import unittest.mock
-        with unittest.mock.patch.object(system.scheduler, 'wait_until_window'):
-            result = system.run_session()
+        # Run the session (session start time is set automatically)
+        result = system.run_session()
         
         if result:
-            print("Test session completed successfully!")
+            print("Session completed successfully!")
         else:
-            print("Test session failed!")
+            print("Session failed!")
         
         return result
-    
-    def _run_continuous_mode(self, config: Configuration):
-        """Run in continuous mode"""
-        print("Starting Night Writer in continuous mode...")
-        print("Press Ctrl+C to stop")
-        print()
-        
-        system = TerminalAutomationSystem(config)
-        
-        if not system.load_tasks(config.tasks_file):
-            print("Failed to load tasks")
-            return False
-        
-        print(f"Loaded {len(system.tasks)} tasks")
-        print("Starting continuous automation...")
-        
-        try:
-            system.run_continuous()
-        except KeyboardInterrupt:
-            print("\nAutomation stopped by user")
-            return True
-        except Exception as e:
-            print(f"Automation failed: {e}")
-            return False
     
     def run(self, args: Optional[list] = None) -> int:
         """Run the CLI"""
@@ -298,11 +265,8 @@ Examples:
                 print("Tasks file validation failed")
                 return 1
             
-            # Run in appropriate mode
-            if parsed_args.test_mode:
-                success = self._run_test_mode(config)
-            else:
-                success = self._run_continuous_mode(config)
+            # Always run in single session mode with manual terminal selection
+            success = self._run_single_session(config)
             
             return 0 if success else 1
             

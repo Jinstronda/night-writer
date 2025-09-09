@@ -18,6 +18,7 @@ import subprocess
 import threading
 import queue
 import logging
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -84,6 +85,90 @@ class Configuration:
     tasks_file: str = "tasks.txt"
 
 
+class RateLimitParser:
+    """Parses terminal output to detect rate limit messages and reset times"""
+    
+    def __init__(self):
+        # Patterns to detect rate limit messages - focusing on the specific format
+        self.rate_limit_patterns = [
+            r"5-hour limit reached.*resets",
+            r"5-hour limit reached.*∙.*resets",
+            r"rate limit reached.*resets",
+            r"limit reached.*resets",
+            r"quota exceeded.*resets"
+        ]
+        
+        # Patterns to extract reset times from the specific format
+        self.reset_time_patterns = [
+            r"5-hour limit reached.*∙.*resets\s+(\d{1,2}am|\d{1,2}pm)",
+            r"resets?\s+(\d{1,2}am|\d{1,2}pm)",
+            r"resets?\s+(\d{1,2}:\d{2})\s*(am|pm)?",
+            r"resets?\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)?",
+            r"next\s+reset\s+(\d{1,2}:\d{2})\s*(am|pm)?",
+            r"available\s+at\s+(\d{1,2}:\d{2})\s*(am|pm)?"
+        ]
+    
+    def parse_output(self, output: str) -> Dict[str, Any]:
+        """Parse terminal output for rate limit information"""
+        result = {
+            'rate_limit_detected': False,
+            'reset_time': None,
+            'message': None
+        }
+        
+        output_lower = output.lower()
+        
+        # Check for rate limit messages
+        for pattern in self.rate_limit_patterns:
+            if re.search(pattern, output_lower):
+                result['rate_limit_detected'] = True
+                result['message'] = output.strip()
+                break
+        
+        # Extract reset time if rate limit detected
+        if result['rate_limit_detected']:
+            reset_time = self._extract_reset_time(output)
+            if reset_time:
+                result['reset_time'] = reset_time
+        
+        return result
+    
+    def _extract_reset_time(self, output: str) -> Optional[str]:
+        """Extract reset time from terminal output"""
+        for pattern in self.reset_time_patterns:
+            match = re.search(pattern, output.lower())
+            if match:
+                time_str = match.group(1)
+                
+                # Handle formats like "4am" or "4pm"
+                if 'am' in time_str or 'pm' in time_str:
+                    return time_str
+                
+                # Handle formats like "4:00" with separate AM/PM
+                am_pm = match.group(2) if len(match.groups()) > 1 else None
+                
+                # Format the time
+                if ':' in time_str:
+                    hour, minute = time_str.split(':')
+                else:
+                    hour = time_str
+                    minute = "00"
+                
+                # Add AM/PM if not specified
+                if not am_pm:
+                    hour_int = int(hour)
+                    if hour_int < 12:
+                        am_pm = "am"
+                    else:
+                        am_pm = "pm"
+                        if hour_int > 12:
+                            hour = str(hour_int - 12)
+                
+                return f"{hour}:{minute} {am_pm}"
+        
+        return None
+
+
 class TerminalWindowManager:
     """Finds and controls existing terminal windows on Windows"""
     
@@ -113,15 +198,27 @@ class TerminalWindowManager:
                 terminal_titles = [
                     "cmd", "Command Prompt", "PowerShell", "Windows PowerShell",
                     "Git Bash", "MINGW64", "Ubuntu", "WSL", "Terminal",
-                    "Windows Terminal", "Alacritty", "Hyper"
+                    "Windows Terminal", "Alacritty", "Hyper", "Anaconda Prompt",
+                    "conda", "python", "node", "npm", "yarn"
                 ]
                 
+                # Exclude non-terminal windows
+                exclude_titles = [
+                    "Settings", "Settings", "Control Panel", "File Explorer",
+                    "Microsoft Edge", "Chrome", "Firefox", "Notepad",
+                    "Calculator", "Task Manager", "Device Manager"
+                ]
+                
+                # Check if it's a terminal window
                 is_terminal = (
                     any(term_class in class_name for term_class in terminal_classes) or
                     any(term_title.lower() in window_text.lower() for term_title in terminal_titles)
                 )
                 
-                if is_terminal and window_text.strip():
+                # Exclude non-terminal windows
+                is_excluded = any(exclude_title.lower() in window_text.lower() for exclude_title in exclude_titles)
+                
+                if is_terminal and not is_excluded and window_text.strip():
                     try:
                         _, pid = win32process.GetWindowThreadProcessId(hwnd)
                         process = psutil.Process(pid)
@@ -140,14 +237,21 @@ class TerminalWindowManager:
         self.terminal_windows = windows
         return windows
     
-    def select_terminal_window(self) -> Optional[Dict[str, Any]]:
-        """Shows you all your open terminals and lets you pick one"""
+    def select_terminal_window(self, auto_select: bool = True) -> Optional[Dict[str, Any]]:
+        """Automatically selects the first available terminal window"""
         windows = self.find_terminal_windows()
         
         if not windows:
             print("No terminal windows found.")
             return None
         
+        if auto_select:
+            # Automatically select the first terminal window
+            selected = windows[0]
+            print(f"Auto-selected terminal: {selected['title']}")
+            return selected
+        
+        # Manual selection (for debugging)
         print("\nAvailable Terminal Windows:")
         print("=" * 50)
         for i, window in enumerate(windows, 1):
@@ -165,20 +269,33 @@ class TerminalWindowManager:
                 
                 choice_num = int(choice)
                 if 1 <= choice_num <= len(windows):
-                    return windows[choice_num - 1]
+                    selected = windows[choice_num - 1]
+                    print(f"Selected: {selected['title']}")
+                    return selected
                 else:
                     print(f"Please enter a number between 1 and {len(windows)}")
             except ValueError:
                 print("Please enter a valid number or 'n'")
             except KeyboardInterrupt:
+                print("\nSelection cancelled")
                 return None
     
     def send_keys_to_window(self, hwnd: int, text: str) -> bool:
         """Types text into a specific window - this is how it talks to your terminal"""
         try:
+            # Check if window is still valid
+            if not win32gui.IsWindow(hwnd):
+                logging.error("Window handle is no longer valid")
+                return False
+            
+            # Check if window is visible
+            if not win32gui.IsWindowVisible(hwnd):
+                logging.error("Window is not visible")
+                return False
+            
             # Activate the window
             win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.1)  # Small delay to ensure window is active
+            time.sleep(0.5)  # Longer delay to ensure window is active
             
             # Send the text
             for char in text:
@@ -273,8 +390,8 @@ class TerminalManager:
             logging.warning("Existing window connection only supported on Windows")
             return False
         
-        # Let user select a window
-        self.selected_window = self.window_manager.select_terminal_window()
+        # Always show terminal selection menu
+        self.selected_window = self.window_manager.select_terminal_window(auto_select=False)
         
         if self.selected_window is None:
             logging.info("No existing window selected, will create new window")
@@ -459,6 +576,9 @@ class TaskExecutor:
         self.terminal_manager = terminal_manager
         self.inactivity_monitor = inactivity_monitor
         self.current_task: Optional[Task] = None
+        self.rate_limit_parser = RateLimitParser()
+        self.rate_limit_detected = False
+        self.detected_reset_time: Optional[str] = None
     
     def execute_task(self, task: Task) -> Task:
         """Execute a single task and monitor for completion"""
@@ -474,7 +594,9 @@ class TaskExecutor:
             task.error = "Failed to send command to terminal"
             return task
         
-        # Monitor for completion
+        # Wait for Claude to start working (not immediately start inactivity monitoring)
+        logging.info("Waiting for Claude to start working...")
+        claude_started = False
         start_time = time.time()
         output_lines = []
         error_lines = []
@@ -492,21 +614,47 @@ class TaskExecutor:
             
             if new_output:
                 output_lines.extend(new_output)
-                self.inactivity_monitor.update_activity()
                 logging.debug(f"Task {task.id} output: {new_output}")
+                
+                # Check if Claude has started working (look for typical Claude output patterns)
+                full_output = "\n".join(output_lines).lower()
+                claude_working_indicators = [
+                    "thinking", "analyzing", "processing", "generating", "writing",
+                    "creating", "building", "implementing", "coding", "working"
+                ]
+                
+                if not claude_started and any(indicator in full_output for indicator in claude_working_indicators):
+                    claude_started = True
+                    logging.info("Claude has started working - beginning inactivity monitoring")
+                    self.inactivity_monitor.reset()  # Reset inactivity monitor now
+                
+                # Check for rate limit messages in the output
+                rate_limit_info = self.rate_limit_parser.parse_output(full_output)
+                if rate_limit_info['rate_limit_detected']:
+                    self.rate_limit_detected = True
+                    self.detected_reset_time = rate_limit_info['reset_time']
+                    logging.info(f"Rate limit detected: {rate_limit_info['message']}")
+                    if rate_limit_info['reset_time']:
+                        logging.info(f"Reset time detected: {rate_limit_info['reset_time']}")
+                    break
+                
+                # Update inactivity monitor only after Claude starts working
+                if claude_started:
+                    self.inactivity_monitor.update_activity()
             
             if new_errors:
                 error_lines.extend(new_errors)
-                self.inactivity_monitor.update_activity()
                 logging.debug(f"Task {task.id} errors: {new_errors}")
+                if claude_started:
+                    self.inactivity_monitor.update_activity()
             
-            # Check for inactivity timeout
-            if self.inactivity_monitor.is_inactive():
+            # Check for inactivity timeout only after Claude starts working
+            if claude_started and self.inactivity_monitor.is_inactive():
                 task.status = TaskStatus.COMPLETED
                 task.output = "\n".join(output_lines)
                 if error_lines:
                     task.error = "\n".join(error_lines)
-                logging.info(f"Task {task.id} completed due to inactivity timeout")
+                logging.info(f"Task {task.id} completed due to inactivity timeout (10 minutes of silence)")
                 break
             
             # Check for maximum execution time (safety timeout)
@@ -532,10 +680,44 @@ class Scheduler:
         self.tz = ZoneInfo(config.timezone)
         self.session_start_time: Optional[datetime] = None
         self.tasks_executed = 0
+        self.detected_reset_time: Optional[str] = None
+        self.rate_limit_detected = False
     
     def next_window_start(self) -> datetime:
         """Calculate the next execution window start time"""
         now = datetime.now(self.tz)
+        
+        # Use detected reset time if available
+        if self.detected_reset_time:
+            try:
+                # Parse the detected reset time
+                time_str = self.detected_reset_time.lower().strip()
+                if 'am' in time_str or 'pm' in time_str:
+                    # Parse AM/PM format
+                    time_part = time_str.replace('am', '').replace('pm', '').strip()
+                    if ':' in time_part:
+                        hh, mm = [int(x) for x in time_part.split(':')]
+                    else:
+                        hh, mm = int(time_part), 0
+                    
+                    # Handle AM/PM
+                    if 'pm' in time_str and hh != 12:
+                        hh += 12
+                    elif 'am' in time_str and hh == 12:
+                        hh = 0
+                    
+                    reset_time = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    
+                    # If the reset time is in the past, assume it's for tomorrow
+                    if reset_time <= now:
+                        reset_time += timedelta(days=1)
+                    
+                    logging.info(f"Using detected reset time: {self.detected_reset_time} -> {reset_time}")
+                    return reset_time
+            except Exception as e:
+                logging.warning(f"Failed to parse detected reset time '{self.detected_reset_time}': {e}")
+        
+        # Fall back to configured start time
         hh, mm = [int(x) for x in self.config.start_time.split(":")]
         today_start = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         
@@ -578,6 +760,39 @@ class Scheduler:
     def record_task_execution(self):
         """Record that a task was executed"""
         self.tasks_executed += 1
+    
+    def update_rate_limit_info(self, rate_limit_detected: bool, reset_time: Optional[str] = None):
+        """Update rate limit information from terminal output"""
+        self.rate_limit_detected = rate_limit_detected
+        if reset_time:
+            self.detected_reset_time = reset_time
+            logging.info(f"Updated reset time to: {reset_time}")
+    
+    def is_rate_limit_detected(self) -> bool:
+        """Check if rate limit has been detected"""
+        return self.rate_limit_detected
+    
+    def wait_until_reset(self):
+        """Wait until the detected reset time"""
+        if not self.rate_limit_detected or not self.detected_reset_time:
+            logging.warning("No rate limit reset time detected, using default start time")
+            self.wait_until_window()
+            return
+        
+        reset_time = self.next_window_start()
+        logging.info(f"Waiting until rate limit resets at {reset_time.isoformat()}")
+        
+        while True:
+            now = datetime.now(self.tz)
+            if now >= reset_time:
+                # Reset session state
+                self.session_start_time = now
+                self.tasks_executed = 0
+                self.rate_limit_detected = False
+                self.detected_reset_time = None
+                logging.info("Rate limit reset - resuming task execution")
+                return
+            time.sleep(60)  # Check every minute
 
 
 class TerminalAutomationSystem:
@@ -595,13 +810,20 @@ class TerminalAutomationSystem:
     def _setup_logging(self):
         """Setup logging configuration"""
         log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
+        
+        # Create handlers with UTF-8 encoding
+        file_handler = logging.FileHandler('terminal_automation.log', encoding='utf-8')
+        console_handler = logging.StreamHandler()
+        
+        # Set formatter
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Configure logging
         logging.basicConfig(
             level=log_level,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler('terminal_automation.log'),
-                logging.StreamHandler()
-            ]
+            handlers=[file_handler, console_handler]
         )
     
     def load_tasks(self, tasks_file: str) -> bool:
@@ -635,6 +857,90 @@ class TerminalAutomationSystem:
             logging.error(f"Failed to load tasks: {e}")
             return False
     
+    def _check_and_wait_for_rate_limits(self):
+        """Check for rate limits and wait if necessary - this is the core logic!"""
+        logging.info("Reading terminal content to detect rate limits...")
+        
+        # Get the current terminal content (last lines)
+        terminal_content = self._get_terminal_content()
+        logging.info(f"Terminal content: {terminal_content[:200]}...")  # Log first 200 chars
+        
+        if terminal_content:
+            # Parse the terminal content for rate limits
+            rate_limit_info = self.task_executor.rate_limit_parser.parse_output(terminal_content)
+            
+            if rate_limit_info['rate_limit_detected']:
+                logging.info(f"Rate limit detected: {rate_limit_info['message']}")
+                if rate_limit_info['reset_time']:
+                    logging.info(f"Reset time: {rate_limit_info['reset_time']}")
+                    
+                    # Update scheduler with detected reset time
+                    self.scheduler.update_rate_limit_info(
+                        rate_limit_info['rate_limit_detected'],
+                        rate_limit_info['reset_time']
+                    )
+                    
+                    # Wait for the detected reset time
+                    logging.info("Waiting for rate limit reset...")
+                    self.scheduler.wait_until_reset()
+                else:
+                    logging.warning("Rate limit detected but no reset time found")
+            else:
+                logging.info("No rate limit detected in terminal content - ready to start tasks")
+        else:
+            # If we can't read terminal content, we should still check if there's a rate limit
+            # by looking at the current time and seeing if we should wait
+            logging.info("No terminal content found - checking if we should wait based on time...")
+            
+            # Check if we're in a rate limit period based on time
+            now = datetime.now(self.scheduler.tz)
+            if now.hour < 4:  # Before 4am, we might be in a rate limit period
+                logging.info("Current time is before 4am - assuming rate limit is active")
+                # Set a default rate limit until 4am
+                self.scheduler.update_rate_limit_info(True, "4am")
+                logging.info("Waiting for rate limit reset...")
+                self.scheduler.wait_until_reset()
+            else:
+                logging.info("Current time is after 4am - ready to start tasks")
+
+    def _get_terminal_content(self):
+        """Get the current content from the terminal"""
+        try:
+            # First, try to get any existing output from the terminal
+            output = self.terminal_manager.get_output()
+            if output:
+                content = "\n".join(output)
+                logging.info(f"Read existing terminal content: {len(content)} characters")
+                return content
+            
+            # If no existing output, try to read from the terminal's current state
+            # For existing terminals, we can't easily read content without sending commands
+            # But we can try to get some basic information
+            if hasattr(self.terminal_manager, 'selected_window') and self.terminal_manager.selected_window:
+                logging.info("Attempting to read terminal state...")
+                
+                # Try to get basic terminal info without sending commands
+                try:
+                    # Check if we can get any output from the terminal
+                    time.sleep(1)  # Wait a bit for any pending output
+                    output = self.terminal_manager.get_output()
+                    if output:
+                        content = "\n".join(output)
+                        logging.info(f"Read terminal content after wait: {len(content)} characters")
+                        return content
+                except Exception as e:
+                    logging.warning(f"Failed to read terminal content: {e}")
+                
+                # If we still can't read content, return empty string
+                logging.warning("No terminal content available - will assume no rate limit")
+                return ""
+            
+            return ""
+            
+        except Exception as e:
+            logging.warning(f"Failed to get terminal content: {e}")
+            return ""
+
     def save_task_output(self, task: Task) -> str:
         """Save task output to file"""
         try:
@@ -678,24 +984,48 @@ class TerminalAutomationSystem:
     def run_session(self) -> bool:
         """Run a complete automation session"""
         try:
-            # Wait for execution window
-            self.scheduler.wait_until_window()
-            
-            # Start terminal
+            # Start terminal first
             if not self.terminal_manager.start_terminal():
                 logging.error("Failed to start terminal")
                 return False
             
             logging.info("Terminal started successfully")
             
-            # Execute tasks
-            for task in self.tasks:
-                if not self.scheduler.is_within_session_limit():
-                    logging.info("Session limits reached, stopping execution")
-                    break
+            # ALWAYS check for rate limits FIRST - this is the key!
+            logging.info("Reading terminal to detect current rate limit status...")
+            self._check_and_wait_for_rate_limits()
+            
+            # Set session start time after rate limit check
+            from datetime import datetime
+            self.scheduler.session_start_time = datetime.now(self.scheduler.tz)
+            self.scheduler.tasks_executed = 0
+            
+            # Execute tasks continuously
+            task_index = 0
+            while task_index < len(self.tasks):
+                task = self.tasks[task_index]
                 
                 # Execute task
                 completed_task = self.task_executor.execute_task(task)
+                
+                # Check if rate limit was detected during task execution
+                if self.task_executor.rate_limit_detected:
+                    logging.info("Rate limit detected during task execution")
+                    self.scheduler.update_rate_limit_info(
+                        self.task_executor.rate_limit_detected,
+                        self.task_executor.detected_reset_time
+                    )
+                    
+                    # Wait for reset time instead of stopping
+                    logging.info("Waiting for rate limit reset...")
+                    self.scheduler.wait_until_reset()
+                    
+                    # Reset task executor state
+                    self.task_executor.rate_limit_detected = False
+                    self.task_executor.detected_reset_time = None
+                    
+                    # Continue with the same task (don't increment index)
+                    continue
                 
                 # Save output
                 output_path = self.save_task_output(completed_task)
@@ -709,6 +1039,14 @@ class TerminalAutomationSystem:
                 self.inactivity_monitor.reset()
                 
                 logging.info(f"Task {completed_task.id} completed with status: {completed_task.status.value}")
+                
+                # Move to next task
+                task_index += 1
+                
+                # Add delay between tasks to prevent running too fast
+                if task_index < len(self.tasks):
+                    logging.info("Waiting 5 seconds before next task...")
+                    time.sleep(5)
             
             logging.info("Session completed successfully")
             return True
