@@ -1,0 +1,13 @@
+{
+  "terminal_type": "powershell",
+  "start_time": "04:00",
+  "timezone": "America/Sao_Paulo",
+  "inactivity_timeout": 600,
+  "max_tasks_per_session": 10,
+  "session_duration_hours": 5,
+  "output_directory": "night_writer_outputs",
+  "log_level": "INFO",
+  "tasks_file": "tasks.txt",
+  "description": "Night Writer Terminal Automation Configuration",
+  "version": "1.0.0"
+}

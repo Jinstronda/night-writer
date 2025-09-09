@@ -1,0 +1,18 @@
+[
+  "Keep going",
+  "Go to the next task",
+  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
+  "Keep going",
+  "Go to the next task",
+  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
+  "Keep going",
+  "Go to the next task",
+  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
+  "Keep going",
+  "Go to the next task",
+  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
+  "Keep going",
+  "Go to the next task",
+  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md"
+]
+
