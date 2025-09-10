@@ -74,6 +74,30 @@ Examples:
             default="night_writer_outputs",
             help="Output directory for task results [default: night_writer_outputs]"
         )
+
+        # Project selection options
+        parser.add_argument(
+            "--projects-root",
+            default=str(Path.cwd()),
+            help="Root directory to scan for projects [default: current directory]"
+        )
+        parser.add_argument(
+            "--project-path",
+            default=None,
+            help="Absolute path to the project directory (skips selection UI)"
+        )
+        parser.add_argument(
+            "--auto-open-claude",
+            action="store_true",
+            default=True,
+            help="Automatically open Claude in selected project (default: true)"
+        )
+        parser.add_argument(
+            "--no-auto-open-claude",
+            action="store_false",
+            dest="auto_open_claude",
+            help="Do not automatically open Claude"
+        )
         
         # Scheduling options
         parser.add_argument(
@@ -139,6 +163,33 @@ Examples:
         
         return parser
     
+    def _prompt_choice(self, title: str, choices: list[str], default_index: int = 0) -> int:
+        print(title)
+        for i, c in enumerate(choices, 1):
+            d = " (default)" if (i - 1) == default_index else ""
+            print(f"  {i}. {c}{d}")
+        while True:
+            ans = input(f"Choose (1-{len(choices)}) [default {default_index+1}]: ").strip()
+            if ans == "":
+                return default_index
+            try:
+                idx = int(ans)
+                if 1 <= idx <= len(choices):
+                    return idx - 1
+            except ValueError:
+                pass
+            print("Please enter a valid number.")
+
+    def _prompt_bool(self, title: str, default: bool = True) -> bool:
+        suf = "Y/n" if default else "y/N"
+        while True:
+            ans = input(f"{title} [{suf}]: ").strip().lower()
+            if ans == "":
+                return default
+            if ans in ("y", "yes"): return True
+            if ans in ("n", "no"): return False
+            print("Please answer y or n.")
+
     def _create_config(self, args) -> Configuration:
         """Create configuration from command line arguments"""
         config = Configuration()
@@ -153,6 +204,7 @@ Examples:
         config.output_directory = args.output_dir
         config.log_level = args.log_level
         config.tasks_file = args.tasks
+        # Transcript / Claude defaults are already in Configuration; nothing to set here
         
         return config
     
@@ -170,7 +222,38 @@ Examples:
         print(f"Inactivity Timeout: {config.inactivity_timeout} seconds")
         print(f"Output Directory: {config.output_directory}")
         print(f"Log Level: {config.log_level}")
+        print(f"Transcript Enabled: {config.transcript_enabled}")
+        print(f"Transcript Path: {config.transcript_path or '~/Documents/session.log'}")
+        print(f"Auto Launch Claude: {config.auto_launch_claude}")
+        print(f"Claude Command: {config.claude_command}")
         print("=" * 40)
+
+    def _list_projects(self, root: Path) -> list[Path]:
+        projects: list[Path] = []
+        try:
+            for p in sorted(root.iterdir()):
+                if p.is_dir() and not p.name.startswith("."):
+                    # Heuristic: treat any directory as a project
+                    projects.append(p)
+        except Exception:
+            pass
+        return projects
+
+    def _select_project_dir(self, root_dir: str) -> Optional[Path]:
+        # Direct path input instead of listing
+        print("Enter the absolute project folder path (e.g., C:\\Users\\you\\Projects\\MyApp)")
+        print("Or enter 's' to skip.")
+        while True:
+            raw = input("Project path: ").strip()
+            if raw.lower() == 's':
+                return None
+            try:
+                p = Path(raw).expanduser().resolve()
+                if p.exists() and p.is_dir():
+                    return p
+                print("Path does not exist or is not a directory. Try again or 's' to skip.")
+            except Exception:
+                print("Invalid path. Try again or 's' to skip.")
     
     def _validate_tasks(self, tasks_file: str) -> bool:
         """Validate tasks file"""
@@ -221,11 +304,55 @@ Examples:
     def _run_single_session(self, config: Configuration) -> bool:
         """Run a single session with manual terminal selection"""
         print("Starting Night Writer...")
-        print("You will be prompted to select a terminal window.")
+        print("You will be prompted to select a project and a terminal window.")
         print()
         
+        # Interactive configuration UI
+        print("Configure Session:")
+        print("=" * 50)
+        term_idx = self._prompt_choice(
+            "Select terminal type:", [t.value for t in TerminalType],
+            default_index=[t.value for t in TerminalType].index(config.terminal_type.value)
+        )
+        config.terminal_type = TerminalType([t.value for t in TerminalType][term_idx])
+
+        conn_idx = self._prompt_choice(
+            "Select connection mode:", [m.value for m in TerminalConnectionMode],
+            default_index=[m.value for m in TerminalConnectionMode].index(config.connection_mode.value)
+        )
+        config.connection_mode = TerminalConnectionMode([m.value for m in TerminalConnectionMode][conn_idx])
+
+        # Always on per user request
+        config.auto_launch_claude = True
+        config.transcript_enabled = True
+
         system = TerminalAutomationSystem(config)
         
+        # Project selection and Claude launch
+        parsed = self.parser.parse_args()
+        projects_root = parsed.projects_root
+        auto_open_claude = parsed.auto_open_claude
+        project_arg = parsed.project_path
+        if project_arg:
+            p = Path(project_arg).expanduser().resolve()
+            if not (p.exists() and p.is_dir()):
+                print(f"Provided --project-path does not exist or is not a directory: {p}")
+                return False
+            project = p
+        else:
+            project = self._select_project_dir(projects_root)
+        if project:
+            print(f"Selected project: {project}")
+            # Ensure PowerShell starts in this directory by sending a cd at session start
+            # We'll store it temporarily and send as the first command once terminal is selected
+            system._initial_project_dir = str(project)
+            # Also set initial working dir for new windows so cmd/pwsh start there
+            system.terminal_manager.initial_working_dir = str(project)
+            system._auto_open_claude = auto_open_claude
+        else:
+            system._initial_project_dir = None
+            system._auto_open_claude = auto_open_claude
+
         if not system.load_tasks(config.tasks_file):
             print("Failed to load tasks")
             return False

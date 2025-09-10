@@ -31,6 +31,11 @@ import win32gui
 import win32con
 import win32api
 import win32process
+import win32clipboard
+from PIL import ImageGrab
+import easyocr
+import pygetwindow as gw
+import pyautogui
 
 
 class TerminalType(Enum):
@@ -56,6 +61,7 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     TIMEOUT = "timeout"
+    RATE_LIMITED = "rate_limited"
 
 
 @dataclass
@@ -83,6 +89,11 @@ class Configuration:
     output_directory: str = "night_writer_outputs"
     log_level: str = "INFO"
     tasks_file: str = "tasks.txt"
+    # Transcript-based capture (PowerShell only)
+    transcript_enabled: bool = True
+    transcript_path: Optional[str] = None  # Defaults to ~/Documents/session.log when None
+    auto_launch_claude: bool = True
+    claude_command: str = "claude --dangerously-skip-permissions"
 
 
 class RateLimitParser:
@@ -236,6 +247,14 @@ class TerminalWindowManager:
         win32gui.EnumWindows(enum_windows_callback, windows)
         self.terminal_windows = windows
         return windows
+
+    def find_window_by_pid(self, pid: int) -> Optional[Dict[str, Any]]:
+        """Find a terminal window record by owning process PID."""
+        windows = self.find_terminal_windows()
+        for w in windows:
+            if w.get('pid') == pid:
+                return w
+        return None
     
     def select_terminal_window(self, auto_select: bool = True) -> Optional[Dict[str, Any]]:
         """Automatically selects the first available terminal window"""
@@ -293,21 +312,68 @@ class TerminalWindowManager:
                 logging.error("Window is not visible")
                 return False
             
-            # Activate the window
-            win32gui.SetForegroundWindow(hwnd)
-            time.sleep(0.5)  # Longer delay to ensure window is active
-            
-            # Send the text
-            for char in text:
-                win32api.keybd_event(ord(char.upper()), 0, 0, 0)  # Key down
-                win32api.keybd_event(ord(char.upper()), 0, win32con.KEYEVENTF_KEYUP, 0)  # Key up
-                time.sleep(0.01)  # Small delay between characters
-            
-            # Send Enter
-            win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
-            win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
-            
-            return True
+            # Try to restore and set foreground robustly with thread input attachment
+            try:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.2)
+                target_tid, _ = win32process.GetWindowThreadProcessId(hwnd)
+                current_tid = win32api.GetCurrentThreadId()
+                win32process.AttachThreadInput(current_tid, target_tid, True)
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                finally:
+                    win32process.AttachThreadInput(current_tid, target_tid, False)
+                time.sleep(0.3)
+            except Exception as e:
+                logging.warning(f"Foreground activation via thread attach failed: {e}")
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.3)
+                except Exception as e2:
+                    logging.error(f"SetForegroundWindow failed: {e2}")
+                    return False
+
+            # Place text on clipboard
+            try:
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.SetClipboardText(text)
+                win32clipboard.CloseClipboard()
+            except Exception as e:
+                try:
+                    win32clipboard.CloseClipboard()
+                except Exception:
+                    pass
+                logging.error(f"Failed to set clipboard text: {e}")
+                return False
+
+            # Paste (Ctrl+V) and press Enter, with small retries
+            def key_down(vk):
+                win32api.keybd_event(vk, 0, 0, 0)
+            def key_up(vk):
+                win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+
+            attempts = 0
+            while attempts < 3:
+                attempts += 1
+                try:
+                    # Ctrl+V
+                    key_down(win32con.VK_CONTROL)
+                    key_down(ord('V'))
+                    time.sleep(0.02)
+                    key_up(ord('V'))
+                    key_up(win32con.VK_CONTROL)
+                    time.sleep(0.1)
+                    # Enter
+                    key_down(win32con.VK_RETURN)
+                    key_up(win32con.VK_RETURN)
+                    return True
+                except Exception as e:
+                    logging.warning(f"Paste attempt {attempts} failed: {e}")
+                    time.sleep(0.2)
+
+            logging.error("Failed to paste and submit text after retries")
+            return False
         except Exception as e:
             logging.error(f"Failed to send keys to window: {e}")
             return False
@@ -364,6 +430,7 @@ class TerminalManager:
         self.window_manager = TerminalWindowManager()
         self.selected_window: Optional[Dict[str, Any]] = None
         self._is_existing_window = False
+        self.initial_working_dir: Optional[str] = None
     
     def start_terminal(self) -> bool:
         """Start a terminal session (new or existing)"""
@@ -406,34 +473,101 @@ class TerminalManager:
     def _create_new_terminal(self) -> bool:
         """Create a new terminal window"""
         try:
+            # Build transcript-aware startup for PowerShell
+            def build_powershell_startup() -> List[str]:
+                ps = ["powershell", "-NoExit", "-Command"]
+                transcript_path = self._resolve_transcript_path()
+                pre = []
+                # Always start transcript and Claude for new sessions
+                if transcript_path:
+                    pre.append(f"Start-Transcript -Path '{transcript_path}' -Append;")
+                # Force Claude start; if already running, this just ensures session is ready
+                pre.append(self._get_config().claude_command + ";")
+                # Small delay and echo to mark ready
+                pre.append("Start-Sleep -Seconds 1; Write-Host '[Claude started]' ;")
+                pre.append("Write-Host 'Night Writer ready.'")
+                command = " ".join(pre)
+                return ps + [command]
+
+            # Decide stdio redirection: for NEW_WINDOW, show visible console output by not capturing stdout/stderr
+            capture_output = (self.connection_mode != TerminalConnectionMode.NEW_WINDOW)
+
             if self.terminal_type == TerminalType.CMD:
                 self.process = subprocess.Popen(
                     ["cmd"],
                     stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=(subprocess.PIPE if capture_output else None),
+                    stderr=(subprocess.PIPE if capture_output else None),
                     text=True,
-                    bufsize=0
+                    bufsize=0,
+                    cwd=self.initial_working_dir or None,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                 )
+                # Attach window info for clipboard and focus
+                try:
+                    time.sleep(0.6)
+                    win = self.window_manager.find_window_by_pid(self.process.pid)
+                    if win:
+                        self.selected_window = win
+                        try:
+                            win32gui.ShowWindow(win['hwnd'], win32con.SW_RESTORE)
+                            win32gui.BringWindowToTop(win['hwnd'])
+                            win32gui.SetForegroundWindow(win['hwnd'])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             elif self.terminal_type == TerminalType.POWERSHELL:
                 self.process = subprocess.Popen(
-                    ["powershell", "-NoExit", "-Command", "-"],
+                    build_powershell_startup(),
                     stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=(subprocess.PIPE if capture_output else None),
+                    stderr=(subprocess.PIPE if capture_output else None),
                     text=True,
-                    bufsize=0
+                    bufsize=0,
+                    cwd=self.initial_working_dir or None,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                 )
+                # Try to bring the created window to foreground if possible
+                try:
+                    time.sleep(0.6)
+                    win = self.window_manager.find_window_by_pid(self.process.pid)
+                    if win:
+                        self.selected_window = win
+                        try:
+                            win32gui.ShowWindow(win['hwnd'], win32con.SW_RESTORE)
+                            win32gui.BringWindowToTop(win['hwnd'])
+                            win32gui.SetForegroundWindow(win['hwnd'])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             elif self.terminal_type in [TerminalType.BASH, TerminalType.ZSH, TerminalType.FISH]:
                 shell_cmd = self.terminal_type.value
                 self.process = subprocess.Popen(
                     [shell_cmd],
                     stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=(subprocess.PIPE if capture_output else None),
+                    stderr=(subprocess.PIPE if capture_output else None),
                     text=True,
-                    bufsize=0
+                    bufsize=0,
+                    cwd=self.initial_working_dir or None,
+                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                 )
+                # Attach window info and focus
+                try:
+                    time.sleep(0.6)
+                    win = self.window_manager.find_window_by_pid(self.process.pid)
+                    if win:
+                        self.selected_window = win
+                        try:
+                            win32gui.ShowWindow(win['hwnd'], win32con.SW_RESTORE)
+                            win32gui.BringWindowToTop(win['hwnd'])
+                            win32gui.SetForegroundWindow(win['hwnd'])
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             else:
                 raise ValueError(f"Unsupported terminal type: {self.terminal_type}")
             
@@ -446,6 +580,38 @@ class TerminalManager:
         except Exception as e:
             logging.error(f"Failed to create new terminal: {e}")
             return False
+
+    def _resolve_transcript_path(self) -> Optional[str]:
+        try:
+            # Access config from parent via weak reference (simple accessor)
+            cfg = self._get_config()
+            if not cfg:
+                return None
+            if cfg.transcript_path:
+                p = Path(os.path.expandvars(os.path.expanduser(cfg.transcript_path)))
+            else:
+                docs = Path(os.path.expanduser("~")) / "Documents"
+                p = docs / "session.log"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return str(p)
+        except Exception:
+            return None
+
+    def _get_config(self) -> Optional[Configuration]:
+        # Walk up to TerminalAutomationSystem to fetch config
+        try:
+            # TerminalManager is owned by TerminalAutomationSystem → access via attribute search
+            # This is a small hack; in larger refactor pass config in constructor
+            import gc
+            for obj in gc.get_objects():
+                try:
+                    if isinstance(obj, TerminalAutomationSystem) and obj.terminal_manager is self:
+                        return obj.config
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
     
     def _start_output_threads(self):
         """Start threads to monitor terminal output"""
@@ -487,9 +653,9 @@ class TerminalManager:
             return False
         
         try:
-            # Check if window is still active
-            if not self.window_manager.is_window_active(self.selected_window['hwnd']):
-                logging.error("Selected terminal window is no longer active")
+            # Ensure window is ready; re-prompt if needed
+            if not self.ensure_window_ready():
+                logging.error("No valid terminal window available to send command")
                 return False
             
             # Send the command
@@ -506,6 +672,30 @@ class TerminalManager:
         except Exception as e:
             logging.error(f"Failed to send command to existing window: {e}")
             return False
+
+    def ensure_window_ready(self) -> bool:
+        """Ensure we have a valid, active window; re-prompt if the previous one died."""
+        if not self._is_existing_window:
+            return True
+        
+        # If we have a selected window and it's active, we're good
+        if self.selected_window and self.window_manager.is_window_active(self.selected_window['hwnd']):
+            return True
+        
+        logging.info("Previously selected window is not available anymore. Please select a terminal again.")
+        # Re-prompt user to select a window
+        self.selected_window = self.window_manager.select_terminal_window(auto_select=False)
+        if not self.selected_window:
+            logging.error("User did not select a replacement terminal window")
+            return False
+        
+        # Double-check new selection
+        if not self.window_manager.is_window_active(self.selected_window['hwnd']):
+            logging.error("Replacement terminal window is not active")
+            return False
+        
+        logging.info(f"Reconnected to terminal window: {self.selected_window['title']}")
+        return True
     
     def _send_command_to_new_window(self, command: str) -> bool:
         """Send command to new window"""
@@ -598,6 +788,7 @@ class TaskExecutor:
         logging.info("Waiting for Claude to start working...")
         claude_started = False
         start_time = time.time()
+        last_rate_limit_check = time.time()
         output_lines = []
         error_lines = []
         
@@ -633,9 +824,12 @@ class TaskExecutor:
                 if rate_limit_info['rate_limit_detected']:
                     self.rate_limit_detected = True
                     self.detected_reset_time = rate_limit_info['reset_time']
+                    task.status = TaskStatus.RATE_LIMITED
+                    task.output = "\n".join(output_lines)
                     logging.info(f"Rate limit detected: {rate_limit_info['message']}")
                     if rate_limit_info['reset_time']:
                         logging.info(f"Reset time detected: {rate_limit_info['reset_time']}")
+                    logging.info(f"Task {task.id} marked as RATE_LIMITED - will retry after reset")
                     break
                 
                 # Update inactivity monitor only after Claude starts working
@@ -647,6 +841,19 @@ class TaskExecutor:
                 logging.debug(f"Task {task.id} errors: {new_errors}")
                 if claude_started:
                     self.inactivity_monitor.update_activity()
+            
+            # For existing windows, periodically check for rate limits
+            if (self.terminal_manager._is_existing_window and 
+                time.time() - last_rate_limit_check > 60):  # Check every minute
+                last_rate_limit_check = time.time()
+                logging.debug("Checking for rate limits in existing terminal...")
+                
+                # Use the new rate limit checking method
+                if self._check_rate_limit_during_task():
+                    task.status = TaskStatus.RATE_LIMITED
+                    task.output = "\n".join(output_lines)
+                    logging.info("Rate limit detected during task execution - marking task as RATE_LIMITED")
+                    break
             
             # Check for inactivity timeout only after Claude starts working
             if claude_started and self.inactivity_monitor.is_inactive():
@@ -806,25 +1013,55 @@ class TerminalAutomationSystem:
         self.scheduler = Scheduler(config)
         self.tasks: List[Task] = []
         self._setup_logging()
+        # Dual-mode clipboard polling (works for both new/existing windows)
+        self._clipboard_poll_interval_sec = 30
     
     def _setup_logging(self):
-        """Setup logging configuration"""
+        """Setup comprehensive logging configuration with detailed tracking"""
         log_level = getattr(logging, self.config.log_level.upper(), logging.INFO)
         
-        # Create handlers with UTF-8 encoding
-        file_handler = logging.FileHandler('terminal_automation.log', encoding='utf-8')
+        # Create detailed formatters with function names and line numbers
+        detailed_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
+        )
+        
+        # Setup file handler with rotation to prevent huge log files
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            'night_writer_detailed.log', 
+            maxBytes=10*1024*1024,  # 10MB max per file
+            backupCount=5,          # Keep 5 backup files
+            encoding='utf-8'
+        )
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(detailed_formatter)
+        
+        # Setup console handler with same detailed format
         console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(detailed_formatter)
         
-        # Set formatter
-        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        
-        # Configure logging
+        # Configure root logger with detailed formatting
         logging.basicConfig(
             level=log_level,
-            handlers=[file_handler, console_handler]
+            handlers=[file_handler, console_handler],
+            format='%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
         )
+        
+        # Log comprehensive system startup information
+        logging.info("="*80)
+        logging.info("🚀 NIGHT WRITER AUTOMATION SYSTEM STARTING")
+        logging.info("="*80)
+        logging.info(f"📋 Configuration Details:")
+        logging.info(f"   • Terminal Type: {self.config.terminal_type.value}")
+        logging.info(f"   • Connection Mode: {self.config.connection_mode.value}")
+        logging.info(f"   • Tasks File: {self.config.tasks_file}")
+        logging.info(f"   • Log Level: {self.config.log_level}")
+        logging.info(f"   • Inactivity Timeout: {self.config.inactivity_timeout} seconds")
+        logging.info(f"   • Auto-launch Claude: {self.config.auto_launch_claude}")
+        logging.info(f"   • Transcript Enabled: {self.config.transcript_enabled}")
+        logging.info(f"   • Timezone: {self.config.timezone}")
+        logging.info("="*80)
     
     def load_tasks(self, tasks_file: str) -> bool:
         """Load tasks from JSON file"""
@@ -860,9 +1097,38 @@ class TerminalAutomationSystem:
     def _check_and_wait_for_rate_limits(self):
         """Check for rate limits and wait if necessary - this is the core logic!"""
         logging.info("Reading terminal content to detect rate limits...")
+
+        # Get the current terminal content (prefer clipboard for existing windows, transcript for new)
+        terminal_content = ""
         
-        # Get the current terminal content (last lines)
-        terminal_content = self._get_terminal_content()
+        if self.terminal_manager._is_existing_window:
+            # For existing windows, clipboard is most reliable - reads current screen content
+            try:
+                terminal_content = self._try_clipboard_copy_method() or ""
+                logging.info(f"Clipboard method returned: {len(terminal_content)} characters")
+            except Exception as e:
+                logging.warning(f"Clipboard method failed: {e}")
+                terminal_content = ""
+        else:
+            # For new windows, try transcript first, then clipboard
+            try:
+                terminal_content = self._read_transcript_tail() or ""
+                logging.info(f"Transcript method returned: {len(terminal_content)} characters")
+            except Exception as e:
+                logging.warning(f"Transcript method failed: {e}")
+                terminal_content = ""
+            
+            if not terminal_content:
+                try:
+                    terminal_content = self._try_clipboard_copy_method() or ""
+                    logging.info(f"Clipboard fallback returned: {len(terminal_content)} characters")
+                except Exception as e:
+                    logging.warning(f"Clipboard fallback failed: {e}")
+                    terminal_content = ""
+        
+        # Final fallback to other methods
+        if not terminal_content:
+            terminal_content = self._get_terminal_content()
         logging.info(f"Terminal content: {terminal_content[:200]}...")  # Log first 200 chars
         
         if terminal_content:
@@ -906,40 +1172,776 @@ class TerminalAutomationSystem:
     def _get_terminal_content(self):
         """Get the current content from the terminal"""
         try:
-            # First, try to get any existing output from the terminal
+            # For existing windows, try multiple methods to read content
+            if hasattr(self.terminal_manager, 'selected_window') and self.terminal_manager.selected_window:
+                logging.info("Attempting to read terminal content from existing window...")
+                
+                # Method 1: Try to read window content directly
+                try:
+                    logging.info("Trying Method 1: Direct window content reading...")
+                    content = self._read_window_content_directly()
+                    if content:
+                        logging.info(f"Read terminal content directly: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 1: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 1 failed: {e}")
+                
+                # Method 2: Try to send a simple command
+                try:
+                    logging.info("Trying Method 2: Simple command...")
+                    content = self._try_simple_command()
+                    if content:
+                        logging.info(f"Read terminal content via simple command: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 2: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 2 failed: {e}")
+                
+                # Method 3: Try PowerShell command
+                try:
+                    logging.info("Trying Method 3: PowerShell command...")
+                    content = self._try_powershell_command()
+                    if content:
+                        logging.info(f"Read terminal content via PowerShell: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 3: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 3 failed: {e}")
+                
+                # Method 4: Try to read console buffer directly
+                try:
+                    logging.info("Trying Method 4: Console buffer reading...")
+                    content = self._try_console_buffer_reading()
+                    if content:
+                        logging.info(f"Read terminal content via console buffer: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 4: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 4 failed: {e}")
+                
+                # Method 5: Try clipboard copy method (BEST!)
+                try:
+                    logging.info("Trying Method 5: Clipboard copy method...")
+                    content = self._try_clipboard_copy_method()
+                    if content:
+                        logging.info(f"Read terminal content via clipboard: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 5: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 5 failed: {e}")
+                
+                # Method 6: Try direct terminal reading
+                try:
+                    logging.info("Trying Method 6: Direct terminal reading...")
+                    content = self._try_direct_terminal_reading()
+                    if content:
+                        logging.info(f"Read terminal content via direct reading: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 6: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 6 failed: {e}")
+                
+                # Method 7: Try screenshot + OCR (fallback)
+                try:
+                    logging.info("Trying Method 7: Screenshot + OCR...")
+                    content = self._try_screenshot_ocr()
+                    if content:
+                        logging.info(f"Read terminal content via screenshot OCR: {len(content)} characters")
+                        return content
+                    else:
+                        logging.info("Method 7: No content returned")
+                except Exception as e:
+                    logging.info(f"Method 7 failed: {e}")
+                
+                logging.warning("All methods failed to read terminal content - will assume no rate limit")
+                return ""
+            
+            # For new windows, use the standard approach
             output = self.terminal_manager.get_output()
             if output:
                 content = "\n".join(output)
-                logging.info(f"Read existing terminal content: {len(content)} characters")
+                logging.info(f"Read terminal content: {len(content)} characters")
                 return content
-            
-            # If no existing output, try to read from the terminal's current state
-            # For existing terminals, we can't easily read content without sending commands
-            # But we can try to get some basic information
-            if hasattr(self.terminal_manager, 'selected_window') and self.terminal_manager.selected_window:
-                logging.info("Attempting to read terminal state...")
-                
-                # Try to get basic terminal info without sending commands
-                try:
-                    # Check if we can get any output from the terminal
-                    time.sleep(1)  # Wait a bit for any pending output
-                    output = self.terminal_manager.get_output()
-                    if output:
-                        content = "\n".join(output)
-                        logging.info(f"Read terminal content after wait: {len(content)} characters")
-                        return content
-                except Exception as e:
-                    logging.warning(f"Failed to read terminal content: {e}")
-                
-                # If we still can't read content, return empty string
-                logging.warning("No terminal content available - will assume no rate limit")
-                return ""
             
             return ""
             
         except Exception as e:
             logging.warning(f"Failed to get terminal content: {e}")
             return ""
+    
+    def _read_window_content_directly(self):
+        """Try to read window content directly using Windows API"""
+        try:
+            logging.info("Getting window handle...")
+            hwnd = self.terminal_manager.selected_window['hwnd']
+            logging.info(f"Window handle: {hwnd}")
+            
+            # Method 1: Try GetWindowText (simpler approach)
+            try:
+                logging.info("Trying GetWindowText...")
+                window_text = win32gui.GetWindowText(hwnd)
+                logging.info(f"GetWindowText result: '{window_text}'")
+                if window_text and len(window_text.strip()) > 0:
+                    # Check if this looks like terminal content (not just window title)
+                    # Window titles are usually short and don't contain terminal output
+                    # Look for terminal-specific indicators that suggest actual terminal output
+                    terminal_content_indicators = [
+                        'limit', 'resets', 'error', 'output', 'command', 'prompt', 
+                        '>', '$', 'PS', 'python', 'npm', 'git', 'conda',
+                        '5-hour limit reached', 'hour limit reached', 'resets',
+                        'claude', 'thinking', 'analyzing', 'working'
+                    ]
+                    
+                    # Window title indicators (these suggest it's just a title, not content)
+                    window_title_indicators = [
+                        'anaconda prompt', 'command prompt', 'powershell', 'terminal',
+                        'windows terminal', 'git bash', 'ubuntu', 'wsl'
+                    ]
+                    
+                    is_window_title = any(title_indicator in window_text.lower() for title_indicator in window_title_indicators)
+                    has_terminal_content = any(indicator in window_text.lower() for indicator in terminal_content_indicators)
+                    
+                    is_terminal_content = (
+                        (len(window_text) > 100 and not is_window_title) or  # Long content that's not a title
+                        (has_terminal_content and not is_window_title) or  # Has terminal indicators but not a title
+                        window_text.count('\n') > 2 or  # Multiple lines suggest terminal output
+                        '5-hour limit reached' in window_text or
+                        'resets' in window_text.lower()
+                    )
+                    
+                    if is_terminal_content:
+                        logging.info(f"Got terminal content via GetWindowText: {len(window_text)} characters")
+                        return window_text
+                    else:
+                        logging.info(f"GetWindowText returned window title (not terminal content): '{window_text[:50]}...'")
+            except Exception as e:
+                logging.info(f"GetWindowText failed: {e}")
+            
+            # Method 2: Try SendMessage approach
+            try:
+                logging.info("Getting window text length...")
+                text_length = win32gui.SendMessage(hwnd, win32con.WM_GETTEXTLENGTH, 0, 0)
+                logging.info(f"Window text length: {text_length}")
+                
+                if text_length > 0:
+                    # Get window text
+                    logging.info("Creating text buffer...")
+                    text_buffer = win32gui.PyMakeBuffer(text_length + 1)
+                    logging.info("Getting window text...")
+                    win32gui.SendMessage(hwnd, win32con.WM_GETTEXT, text_length + 1, text_buffer)
+                    # Convert buffer to string properly
+                    try:
+                        # Try different approaches to decode the buffer
+                        if hasattr(text_buffer, 'decode'):
+                            content = text_buffer[:text_length].decode('utf-8', errors='ignore')
+                        else:
+                            # Convert to bytes first
+                            content_bytes = bytes(text_buffer[:text_length])
+                            content = content_bytes.decode('utf-8', errors='ignore')
+                    except Exception as decode_error:
+                        logging.info(f"Decode error: {decode_error}, trying alternative method")
+                        # Try as string directly
+                        try:
+                            content = str(text_buffer[:text_length])
+                        except:
+                            content = ""
+                    
+                    if content and len(content.strip()) > 0:
+                        logging.info(f"SendMessage returned: {len(content)} characters")
+                        # This is likely still just the window title, not terminal content
+                        logging.info("SendMessage approach also returned window title, not terminal content")
+                    else:
+                        logging.info("SendMessage returned empty content")
+                else:
+                    logging.info("Window has no text content")
+            except Exception as e:
+                logging.info(f"SendMessage approach failed: {e}")
+            
+            # Both GetWindowText and SendMessage only returned window title, not terminal content
+            logging.info("Direct window reading methods only found window title, not terminal content")
+            return None
+        except Exception as e:
+            logging.info(f"Direct window reading failed: {e}")
+            return None
+    
+    def _try_simple_command(self):
+        """Try to send a simple command to read terminal content"""
+        try:
+            # Since we can successfully send commands, let's use a command that shows recent history
+            # This will show the terminal content including any rate limit messages
+            history_command = "echo ==TERMINAL_CONTENT== && echo. && echo Recent terminal activity:"
+            logging.info(f"Sending history command: {history_command}")
+            
+            # Try to send command with minimal window activation
+            logging.info("Attempting to send command to existing window...")
+            
+            # Try multiple approaches to send the command
+            success = False
+            
+            # Approach 1: Try the normal method
+            try:
+                success = self.terminal_manager._send_command_to_existing_window(history_command)
+                logging.info(f"Normal command sending result: {success}")
+            except Exception as e:
+                logging.info(f"Normal command sending failed: {e}")
+            
+            # Approach 2: Try direct window manipulation if normal method fails
+            if not success:
+                try:
+                    logging.info("Trying direct window manipulation...")
+                    hwnd = self.terminal_manager.selected_window['hwnd']
+                    
+                    # Try to restore and activate window without thread attachment
+                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    time.sleep(0.1)
+                    
+                    # Try to set foreground without thread attachment
+                    try:
+                        win32gui.SetForegroundWindow(hwnd)
+                        time.sleep(0.2)
+                    except Exception as e:
+                        logging.info(f"SetForegroundWindow failed: {e}")
+                    
+                    # Try to send keys directly
+                    success = self.terminal_manager.send_keys_to_window(hwnd, history_command)
+                    logging.info(f"Direct key sending result: {success}")
+                    
+                except Exception as e:
+                    logging.info(f"Direct window manipulation failed: {e}")
+            
+            if success:
+                logging.info("Command sent successfully, waiting for output...")
+                time.sleep(2)  # Wait longer for command to execute
+                output = self.terminal_manager.get_output()
+                logging.info(f"Got output: {output}")
+                if output:
+                    content = "\n".join(output)
+                    if "TERMINAL_CONTENT" in content:
+                        logging.info("History command succeeded")
+                        return content
+                    else:
+                        logging.info("Command output doesn't contain expected marker")
+                        # Still return the content as it might contain rate limit info
+                        return content
+                else:
+                    logging.info("No output received")
+            else:
+                logging.info("All command sending methods failed")
+            
+            # Since we know the terminal is showing rate limit messages, let's try a different approach
+            # Let's use a PowerShell command to get the console buffer content
+            try:
+                logging.info("Trying PowerShell buffer reading...")
+                ps_command = 'powershell -Command "Get-Content -Path CONIN$ -TotalCount 50 2>$null || echo \'Buffer read failed\'"'
+                success = self.terminal_manager._send_command_to_existing_window(ps_command)
+                if success:
+                    time.sleep(3)
+                    output = self.terminal_manager.get_output()
+                    if output:
+                        content = "\n".join(output)
+                        logging.info(f"PowerShell buffer content: {len(content)} characters")
+                        return content
+            except Exception as e:
+                logging.info(f"PowerShell buffer reading failed: {e}")
+            
+            return None
+        except Exception as e:
+            logging.info(f"Simple command failed: {e}")
+            return None
+    
+    def _try_direct_terminal_reading(self):
+        """Try to read terminal content using direct subprocess approach"""
+        try:
+            logging.info("Trying direct terminal reading with subprocess...")
+            
+            # Try to get the process ID of the terminal window
+            hwnd = self.terminal_manager.selected_window['hwnd']
+            _, pid = win32process.GetWindowThreadProcessId(hwnd)
+            
+            logging.info(f"Terminal process ID: {pid}")
+            
+            # Try to read the terminal content using Windows API
+            # This is a more direct approach than sending commands
+            import ctypes
+            from ctypes import wintypes
+            
+            # Try to attach to the process and read its console
+            try:
+                # Open process with read access
+                PROCESS_VM_READ = 0x0010
+                PROCESS_QUERY_INFORMATION = 0x0400
+                
+                process_handle = ctypes.windll.kernel32.OpenProcess(
+                    PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
+                    False,
+                    pid
+                )
+                
+                if process_handle:
+                    logging.info("Successfully opened process handle")
+                    # For now, just return None as this is complex
+                    # In a real implementation, you'd read the process memory
+                    ctypes.windll.kernel32.CloseHandle(process_handle)
+                    return None
+                else:
+                    logging.info("Failed to open process handle")
+                    return None
+                    
+            except Exception as e:
+                logging.info(f"Direct process reading failed: {e}")
+                return None
+                
+        except Exception as e:
+            logging.info(f"Direct terminal reading failed: {e}")
+            return None
+    
+    def _try_clipboard_copy_method(self):
+        """Try to read terminal content using clipboard copy (Ctrl+A, Ctrl+C)"""
+        try:
+            hwnd = self.terminal_manager.selected_window['hwnd']
+            window_title = self.terminal_manager.selected_window['title']
+            
+            logging.info(f"Using clipboard method for window: {window_title}")
+            
+            # First, ensure the window is visible and focused
+            try:
+                # Restore window if minimized
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.3)
+                
+                # Try to bring window to front
+                win32gui.BringWindowToTop(hwnd)
+                time.sleep(0.3)
+                
+                # Try to set foreground
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.5)
+                except Exception as e:
+                    logging.info(f"SetForegroundWindow failed (continuing anyway): {e}")
+                
+            except Exception as e:
+                logging.info(f"Window activation failed (continuing anyway): {e}")
+            
+            # Clear clipboard first
+            try:
+                win32clipboard.OpenClipboard()
+                win32clipboard.EmptyClipboard()
+                win32clipboard.CloseClipboard()
+                time.sleep(0.1)
+            except Exception as e:
+                logging.info(f"Clipboard clear failed (continuing anyway): {e}")
+            
+            # For Windows Terminal, we need to use different key combinations
+            # Try multiple approaches to select and copy text
+            
+            # Approach 1: Try standard Ctrl+A, Ctrl+C
+            logging.info("Trying standard text selection (Ctrl+A, Ctrl+C)...")
+            pyautogui.hotkey('ctrl', 'a')
+            time.sleep(0.3)
+            pyautogui.hotkey('ctrl', 'c')
+            time.sleep(0.5)
+            
+            # Check if clipboard has content
+            has_content = False
+            try:
+                win32clipboard.OpenClipboard()
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    test_content = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                    if test_content and len(test_content.strip()) > 10:  # More than just window title
+                        has_content = True
+                        logging.info("Standard selection worked!")
+                win32clipboard.CloseClipboard()
+            except:
+                try:
+                    win32clipboard.CloseClipboard()
+                except:
+                    pass
+            
+            # Approach 2: If standard didn't work, try Windows Terminal specific method
+            if not has_content:
+                logging.info("Standard selection failed, trying Windows Terminal method...")
+                
+                # Clear clipboard first
+                try:
+                    win32clipboard.OpenClipboard()
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.CloseClipboard()
+                    time.sleep(0.1)
+                except:
+                    pass
+                
+                # Try right-click menu approach
+                try:
+                    # Right click to open context menu
+                    pyautogui.rightClick()
+                    time.sleep(0.3)
+                    
+                    # Try to find "Select All" and "Copy" in the context menu
+                    # This varies by terminal, but we can try common key sequences
+                    pyautogui.press('escape')  # Close menu first
+                    time.sleep(0.2)
+                    
+                    # Try Ctrl+Shift+A for Windows Terminal
+                    pyautogui.hotkey('ctrl', 'shift', 'a')
+                    time.sleep(0.3)
+                    pyautogui.hotkey('ctrl', 'shift', 'c')
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    logging.info(f"Windows Terminal method failed: {e}")
+                
+                # Check if this approach worked
+                try:
+                    win32clipboard.OpenClipboard()
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                        test_content = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        if test_content and len(test_content.strip()) > 10:
+                            has_content = True
+                            logging.info("Windows Terminal method worked!")
+                    win32clipboard.CloseClipboard()
+                except:
+                    try:
+                        win32clipboard.CloseClipboard()
+                    except:
+                        pass
+            
+            # Approach 3: Try triple-click to select all and then copy
+            if not has_content:
+                logging.info("Trying triple-click selection...")
+                
+                # Clear clipboard
+                try:
+                    win32clipboard.OpenClipboard()
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.CloseClipboard()
+                    time.sleep(0.1)
+                except:
+                    pass
+                
+                # Triple click to select all text
+                pyautogui.tripleClick()
+                time.sleep(0.3)
+                pyautogui.hotkey('ctrl', 'c')
+                time.sleep(0.5)
+            
+            # Read from clipboard
+            try:
+                win32clipboard.OpenClipboard()
+                if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                    content = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                    win32clipboard.CloseClipboard()
+                    
+                    if content and len(content.strip()) > 0:
+                        logging.info(f"Successfully read {len(content)} characters from clipboard")
+                        # Check if this looks like actual terminal content vs just window title
+                        if len(content) > 50 or any(keyword in content.lower() for keyword in ['limit', 'resets', '>', '$', 'c:\\', 'echo']):
+                            return content
+                        else:
+                            logging.info("Clipboard content appears to be just window title or minimal content")
+                            return None
+                    else:
+                        logging.info("Clipboard content is empty")
+                        return None
+                else:
+                    win32clipboard.CloseClipboard()
+                    logging.info("No text format available in clipboard")
+                    return None
+                    
+            except Exception as e:
+                try:
+                    win32clipboard.CloseClipboard()
+                except:
+                    pass
+                logging.info(f"Clipboard reading failed: {e}")
+                return None
+                
+        except Exception as e:
+            logging.info(f"Clipboard copy method failed: {e}")
+            return None
+    
+    def _try_powershell_command(self):
+        """Try to send a PowerShell command to read terminal content"""
+        try:
+            # Try PowerShell command with better error handling
+            capture_command = "echo TERMINAL_STATE && powershell -Command \"Get-Content -Path 'con' -Tail 10\""
+            
+            if self.terminal_manager._send_command_to_existing_window(capture_command):
+                time.sleep(3)
+                output = self.terminal_manager.get_output()
+                if output:
+                    content = "\n".join(output)
+                    if "TERMINAL_STATE" in content:
+                        logging.info("PowerShell command succeeded")
+                        return content
+            
+            return None
+        except Exception as e:
+            logging.debug(f"PowerShell command failed: {e}")
+            return None
+    
+    def _try_console_buffer_reading(self):
+        """Try to read console buffer directly using Windows API"""
+        try:
+            hwnd = self.terminal_manager.selected_window['hwnd']
+            logging.info(f"Attempting to read console buffer for window {hwnd}")
+            
+            import ctypes
+            from ctypes import wintypes, Structure, c_char, c_short, c_ushort, c_ulong
+            
+            # Define Windows API structures
+            class COORD(Structure):
+                _fields_ = [("X", c_short), ("Y", c_short)]
+            
+            class SMALL_RECT(Structure):
+                _fields_ = [("Left", c_short), ("Top", c_short), ("Right", c_short), ("Bottom", c_short)]
+            
+            class CONSOLE_SCREEN_BUFFER_INFO(Structure):
+                _fields_ = [
+                    ("dwSize", COORD),
+                    ("dwCursorPosition", COORD),
+                    ("wAttributes", c_ushort),
+                    ("srWindow", SMALL_RECT),
+                    ("dwMaximumWindowSize", COORD)
+                ]
+            
+            class CHAR_INFO(Structure):
+                _fields_ = [("Char", c_ushort), ("Attributes", c_ushort)]
+            
+            # Get Windows API functions
+            kernel32 = ctypes.windll.kernel32
+            
+            # Try to get the console window handle
+            try:
+                console_hwnd = kernel32.GetConsoleWindow()
+                logging.info(f"Console window handle: {console_hwnd}, Target window: {hwnd}")
+                
+                if console_hwnd == hwnd:
+                    logging.info("Window is a console window, reading buffer...")
+                    
+                    # Get console handle
+                    console_handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+                    if console_handle == -1 or console_handle is None:
+                        logging.info("Failed to get console handle")
+                        return None
+                    
+                    # Get console screen buffer info
+                    buffer_info = CONSOLE_SCREEN_BUFFER_INFO()
+                    if not kernel32.GetConsoleScreenBufferInfo(console_handle, ctypes.byref(buffer_info)):
+                        logging.info("Failed to get console screen buffer info")
+                        return None
+                    
+                    # Calculate buffer size
+                    buffer_width = buffer_info.dwSize.X
+                    buffer_height = buffer_info.dwSize.Y
+                    logging.info(f"Console buffer size: {buffer_width}x{buffer_height}")
+                    
+                    # Read the entire console buffer
+                    buffer_size = buffer_width * buffer_height
+                    char_buffer = (CHAR_INFO * buffer_size)()
+                    
+                    # Define the region to read (entire buffer)
+                    read_region = SMALL_RECT()
+                    read_region.Left = 0
+                    read_region.Top = 0
+                    read_region.Right = buffer_width - 1
+                    read_region.Bottom = buffer_height - 1
+                    
+                    # Read console output
+                    if kernel32.ReadConsoleOutputW(
+                        console_handle,
+                        ctypes.byref(char_buffer),
+                        COORD(buffer_width, buffer_height),
+                        COORD(0, 0),
+                        ctypes.byref(read_region)
+                    ):
+                        # Extract text from buffer
+                        text_lines = []
+                        for y in range(buffer_height):
+                            line = ""
+                            for x in range(buffer_width):
+                                char_info = char_buffer[y * buffer_width + x]
+                                char_code = char_info.Char
+                                if char_code != 0:  # Skip null characters
+                                    line += chr(char_code)
+                            
+                            if line.strip():  # Only add non-empty lines
+                                text_lines.append(line.rstrip())
+                        
+                        if text_lines:
+                            content = "\n".join(text_lines)
+                            logging.info(f"Read console buffer: {len(content)} characters")
+                            return content
+                        else:
+                            logging.info("Console buffer is empty")
+                            return None
+                    else:
+                        logging.info("Failed to read console output")
+                        return None
+                else:
+                    logging.info(f"Window {hwnd} is not the console window {console_hwnd}")
+                    return None
+                    
+            except Exception as e:
+                logging.info(f"Console buffer reading failed: {e}")
+                return None
+                
+        except Exception as e:
+            logging.info(f"Console buffer reading failed: {e}")
+            return None
+    
+    def _try_screenshot_ocr(self):
+        """Try to read terminal content using screenshot + OCR"""
+        try:
+            hwnd = self.terminal_manager.selected_window['hwnd']
+            window_title = self.terminal_manager.selected_window['title']
+            
+            logging.info(f"Taking screenshot of window: {window_title}")
+            
+            # First, ensure the window is visible and focused
+            try:
+                # Restore window if minimized
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                time.sleep(0.2)
+                
+                # Try to bring window to front
+                win32gui.BringWindowToTop(hwnd)
+                time.sleep(0.2)
+                
+                # Try to set foreground (may fail, but that's ok)
+                try:
+                    win32gui.SetForegroundWindow(hwnd)
+                    time.sleep(0.2)
+                except Exception as e:
+                    logging.info(f"SetForegroundWindow failed (this is ok): {e}")
+                
+            except Exception as e:
+                logging.info(f"Window activation failed (this is ok): {e}")
+            
+            # Method 1: Try using pygetwindow to get window bounds
+            try:
+                windows = gw.getWindowsWithTitle(window_title)
+                if windows:
+                    window = windows[0]
+                    logging.info(f"Found window via pygetwindow: {window.left}, {window.top}, {window.width}, {window.height}")
+                    
+                    # Take screenshot of the window
+                    bbox = (window.left, window.top, window.left + window.width, window.top + window.height)
+                    screenshot = ImageGrab.grab(bbox=bbox)
+                    logging.info(f"Screenshot captured: {screenshot.size}")
+                    
+                    # Save screenshot for debugging
+                    screenshot.save("debug_terminal_screenshot.png")
+                    logging.info("Screenshot saved as debug_terminal_screenshot.png")
+                    
+                else:
+                    logging.info("Window not found via pygetwindow, trying win32gui approach")
+                    # Method 2: Use win32gui to get window rectangle
+                    rect = win32gui.GetWindowRect(hwnd)
+                    left, top, right, bottom = rect
+                    logging.info(f"Window rect via win32gui: {left}, {top}, {right}, {bottom}")
+                    
+                    # Take screenshot of the window
+                    bbox = (left, top, right, bottom)
+                    screenshot = ImageGrab.grab(bbox=bbox)
+                    logging.info(f"Screenshot captured: {screenshot.size}")
+                    
+                    # Save screenshot for debugging
+                    screenshot.save("debug_terminal_screenshot.png")
+                    logging.info("Screenshot saved as debug_terminal_screenshot.png")
+                    
+            except Exception as e:
+                logging.info(f"Screenshot capture failed: {e}")
+                return None
+            
+            # Initialize EasyOCR reader (English only for better performance)
+            logging.info("Initializing EasyOCR...")
+            reader = easyocr.Reader(['en'], gpu=False)  # Use CPU for better compatibility
+            
+            # Perform OCR on the screenshot
+            logging.info("Performing OCR on screenshot...")
+            # Convert PIL Image to numpy array for EasyOCR
+            import numpy as np
+            screenshot_array = np.array(screenshot)
+            results = reader.readtext(screenshot_array)
+            
+            # Extract text from OCR results
+            extracted_text = []
+            for (bbox, text, confidence) in results:
+                if confidence > 0.5:  # Only include high-confidence text
+                    extracted_text.append(text)
+                    logging.info(f"OCR result: '{text}' (confidence: {confidence:.2f})")
+            
+            if extracted_text:
+                content = "\n".join(extracted_text)
+                logging.info(f"OCR extracted {len(content)} characters of text")
+                return content
+            else:
+                logging.info("No text extracted from OCR")
+                return None
+                
+        except Exception as e:
+            logging.info(f"Screenshot OCR failed: {e}")
+            return None
+
+    def _check_rate_limit_during_task(self) -> bool:
+        """Check for rate limits during task execution for existing windows"""
+        try:
+            if not self.terminal_manager._is_existing_window:
+                return False
+            
+            # For existing windows, we need to use a different approach
+            # We'll send a command that will show the current terminal content
+            # and then try to capture it
+            
+            # Send a command to get the current terminal content
+            # This will show the last few lines of the terminal
+            check_command = "echo '=== RATE LIMIT CHECK ===' && echo 'Last 10 lines:' && powershell -Command \"Get-Content -Path 'con' -Tail 10\""
+            
+            if self.terminal_manager.send_command(check_command):
+                time.sleep(3)  # Wait for command to execute
+                
+                # Try to get any output (this might not work for existing windows)
+                output = self.terminal_manager.get_output()
+                if output:
+                    content = "\n".join(output)
+                    logging.debug(f"Rate limit check output: {content}")
+                    
+                    # Check for rate limits in the output
+                    rate_limit_info = self.task_executor.rate_limit_parser.parse_output(content)
+                    if rate_limit_info['rate_limit_detected']:
+                        self.task_executor.rate_limit_detected = True
+                        self.task_executor.detected_reset_time = rate_limit_info['reset_time']
+                        logging.info(f"Rate limit detected during task: {rate_limit_info['message']}")
+                        if rate_limit_info['reset_time']:
+                            logging.info(f"Reset time detected during task: {rate_limit_info['reset_time']}")
+                        return True
+                
+                # If we can't read output, we'll use a different approach
+                # We'll send a command that might trigger a rate limit response
+                # and then check if the command was successful
+                logging.debug("Cannot read output from existing terminal - using alternative rate limit detection")
+                
+                # Send a simple command to check if we get a rate limit response
+                test_command = "echo 'Testing rate limit...'"
+                if self.terminal_manager.send_command(test_command):
+                    time.sleep(2)
+                    # If we can't read the response, we'll assume no rate limit for now
+                    # This is a limitation of existing window mode
+                    logging.debug("Rate limit check completed (no output readable)")
+                
+            return False
+            
+        except Exception as e:
+            logging.warning(f"Failed to check rate limit during task: {e}")
+            return False
 
     def save_task_output(self, task: Task) -> str:
         """Save task output to file"""
@@ -990,10 +1992,26 @@ class TerminalAutomationSystem:
                 return False
             
             logging.info("Terminal started successfully")
+
+            # If a project directory was selected, cd into it and optionally open Claude
+            initial_dir = getattr(self, "_initial_project_dir", None)
+            auto_open = getattr(self, "_auto_open_claude", True)
+            if initial_dir and self.terminal_manager._is_existing_window:
+                cd_cmd = f"cd '{initial_dir}'"
+                self.terminal_manager.send_command(cd_cmd)
+                time.sleep(0.5)
+                if auto_open and self.config.auto_launch_claude:
+                    self.terminal_manager.send_command(self.config.claude_command)
+                    time.sleep(0.5)
             
             # ALWAYS check for rate limits FIRST - this is the key!
             logging.info("Reading terminal to detect current rate limit status...")
             self._check_and_wait_for_rate_limits()
+            
+            # After long waits, re-validate the window before sending anything
+            if not self.terminal_manager.ensure_window_ready():
+                logging.error("No valid terminal window after rate-limit wait")
+                return False
             
             # Set session start time after rate limit check
             from datetime import datetime
@@ -1006,6 +2024,11 @@ class TerminalAutomationSystem:
                 task = self.tasks[task_index]
                 
                 # Execute task
+                # Validate window before each task (handles terminals that closed or changed)
+                if not self.terminal_manager.ensure_window_ready():
+                    logging.error("No valid terminal window available for task; reselect a terminal")
+                    # Give the user a chance to pick a new window and retry same task
+                    continue
                 completed_task = self.task_executor.execute_task(task)
                 
                 # Check if rate limit was detected during task execution
@@ -1024,29 +2047,67 @@ class TerminalAutomationSystem:
                     self.task_executor.rate_limit_detected = False
                     self.task_executor.detected_reset_time = None
                     
+                    # Re-validate window after waking up from a rate limit wait
+                    if not self.terminal_manager.ensure_window_ready():
+                        logging.error("No valid terminal window after rate-limit wait while looping tasks")
+                        continue
+                    
                     # Continue with the same task (don't increment index)
                     continue
                 
-                # Save output
-                output_path = self.save_task_output(completed_task)
-                if output_path:
-                    logging.info(f"Task {completed_task.id} output saved to {output_path}")
-                
-                # Record execution
-                self.scheduler.record_task_execution()
-                
-                # Reset inactivity monitor for next task
-                self.inactivity_monitor.reset()
-                
-                logging.info(f"Task {completed_task.id} completed with status: {completed_task.status.value}")
-                
-                # Move to next task
-                task_index += 1
+                # Only save output and record execution if task was actually completed
+                if completed_task.status == TaskStatus.COMPLETED:
+                    # Save output
+                    output_path = self.save_task_output(completed_task)
+                    if output_path:
+                        logging.info(f"Task {completed_task.id} output saved to {output_path}")
+                    
+                    # Record execution
+                    self.scheduler.record_task_execution()
+                    
+                    # Reset inactivity monitor for next task
+                    self.inactivity_monitor.reset()
+                    
+                    logging.info(f"Task {completed_task.id} completed with status: {completed_task.status.value}")
+                    
+                    # Move to next task
+                    task_index += 1
+                elif completed_task.status == TaskStatus.RATE_LIMITED:
+                    logging.info(f"Task {completed_task.id} was rate limited - will retry after reset")
+                    # Don't increment task_index - will retry the same task
+                    continue
+                else:
+                    logging.info(f"Task {completed_task.id} failed with status: {completed_task.status.value}")
+                    # Move to next task even if failed
+                    task_index += 1
                 
                 # Add delay between tasks to prevent running too fast
                 if task_index < len(self.tasks):
-                    logging.info("Waiting 5 seconds before next task...")
-                    time.sleep(5)
+                    # During delay, poll for rate-limit detection
+                    logging.info("Waiting 5 seconds before next task (polling for rate limits)...")
+                    try:
+                        time.sleep(1)
+                        # Use same logic as main rate limit check
+                        snapshot = ""
+                        if self.terminal_manager._is_existing_window:
+                            snapshot = self._try_clipboard_copy_method() or ""
+                        else:
+                            snapshot = self._read_transcript_tail() or ""
+                            if not snapshot:
+                                snapshot = self._try_clipboard_copy_method() or ""
+                        
+                        if snapshot:
+                            info = self.task_executor.rate_limit_parser.parse_output(snapshot)
+                            if info['rate_limit_detected']:
+                                self.scheduler.update_rate_limit_info(True, info['reset_time'])
+                                logging.info("Rate limit detected between tasks; waiting for reset...")
+                                self.scheduler.wait_until_reset()
+                                if not self.terminal_manager.ensure_window_ready():
+                                    logging.error("No valid terminal window after rate-limit wait between tasks")
+                                continue
+                    except Exception:
+                        pass
+                    time.sleep(4)
             
             logging.info("Session completed successfully")
             return True
@@ -1059,6 +2120,32 @@ class TerminalAutomationSystem:
             return False
         finally:
             self.terminal_manager.stop_terminal()
+    
+    def _read_transcript_tail(self, max_bytes: int = 16384) -> str:
+        """Read the tail of the PowerShell transcript log, if available."""
+        try:
+            transcript_path = self.terminal_manager._resolve_transcript_path()
+            if not transcript_path:
+                return ""
+            p = Path(transcript_path)
+            if not p.exists():
+                return ""
+            with open(p, 'rb') as f:
+                try:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - max_bytes), 0)
+                except Exception:
+                    pass
+                data = f.read()
+            try:
+                text = data.decode('utf-8', errors='ignore')
+            except Exception:
+                text = data.decode('cp1252', errors='ignore')
+            return text
+        except Exception as e:
+            logging.debug(f"Transcript read failed: {e}")
+            return ""
     
     def run_continuous(self):
         """Run continuously, waiting for next execution windows"""

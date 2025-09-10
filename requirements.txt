@@ -5,6 +5,10 @@ psutil>=5.9.0
 
 # Windows API dependencies (for existing window support)
 pywin32>=306; sys_platform == "win32"
+Pillow>=10.0.0
+easyocr>=1.7.0
+pygetwindow>=0.0.9
+pyautogui>=0.9.54
 
 # Optional dependencies for enhanced functionality
 # schedule>=1.2.0  # For advanced scheduling (if needed)

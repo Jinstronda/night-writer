@@ -1,18 +1,8 @@
 [
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md",
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code: run unit, integration, and e2e tests; ensure coverage is at least 80 percent; verify the build passes locally; lint and format; run type checks; remove dead code and unused dependencies only; update the README and usage examples; write a brief CHANGELOG entry; add or update tests for new behavior; commit with a clear message; follow tasks from tasks.md, design from design.md, and architecture from architecture.md"
+  "Go to the next task in the list of pending features or fixes for the financial dashboard",
+  "Clean the codebase: remove unused variables, functions, and files; ensure consistent formatting; and add clear inline documentation and module-level explanations",
+  "Go to the next task in the list of pending features or fixes for the financial dashboard",
+  "Run a complete test of the financial dashboard workflow end-to-end: connect to data sources, process data, and render charts; log any errors and store the test results",
+  "Go to the next task in the list of pending features or fixes for the financial dashboard",
+  "Iterate on the financial dashboard workflow until data ingestion, processing, and visualization run reliably without manual intervention; document setup and usage in the README"
 ]
-
