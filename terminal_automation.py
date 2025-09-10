@@ -1,13 +1,62 @@
 """
-Terminal Automation System for Night Writer
+🌙 NIGHT WRITER - Terminal Automation System for Claude Code
 
-This module provides a comprehensive terminal automation system that can:
-1. Select and interact with different terminal types
-2. Execute tasks from JSON with inactivity monitoring
-3. Handle scheduling and rate limiting (5-hour windows, 4am resets)
-4. Monitor CLI activity and detect completion
+This module provides a comprehensive automation system that intelligently manages
+Claude Code sessions, executing tasks from JSON files while handling rate limits.
+
+🎯 WHAT IT DOES:
+The system connects to your terminal (existing or new), sends tasks to Claude Code,
+monitors for completion, and automatically handles rate limits by waiting for resets.
+
+🏗️ SYSTEM ARCHITECTURE:
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        NIGHT WRITER ARCHITECTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
+│  │ 📋 JSON Tasks   │───▶│ 🧠 Main System  │───▶│ 🖥️ Terminal     │         │
+│  │ (User Input)    │    │ (Orchestrator)  │    │ Manager         │         │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘         │
+│                                  │                       │                 │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
+│  │ ⏰ Scheduler     │◀───│ 🔍 Rate Limit   │◀───│ 📋 Clipboard    │         │
+│  │ (Timing Logic)  │    │ Parser          │    │ Reader          │         │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘         │
+│                                  │                                         │
+│  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐         │
+│  │ 👀 Inactivity   │◀───│ 🚀 Task         │───▶│ 📝 Claude Code  │         │
+│  │ Monitor         │    │ Executor        │    │ (Target)        │         │
+│  └─────────────────┘    └─────────────────┘    └─────────────────┘         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+🔄 MAIN WORKFLOW:
+1. 📚 Load tasks from JSON file (tasks.txt)
+2. 🔌 Connect to terminal (existing Claude session or create new)
+3. 🔍 Check current rate limit status via clipboard/transcript
+4. 🚀 Send task to Claude and wait for it to start working
+5. 👀 Monitor for inactivity (10min silence = task complete)
+6. 🚫 If rate limited, parse reset time and wait automatically
+7. 🔄 Continue with next task until all are complete
+
+🎯 KEY FEATURES:
+• Smart Rate Limit Detection: Finds "5-hour limit reached ∙ resets 7pm" messages
+• Clipboard Reading: Captures exactly what you see on terminal screen
+• Intelligent Scheduling: Waits for rate resets, never stops permanently
+• Multi-Terminal Support: PowerShell, CMD, existing/new windows
+• Comprehensive Logging: Detailed logs with emojis for easy monitoring
+• Robust Error Handling: Gracefully handles window closures, network issues
+
+🛠️ TECHNICAL DETAILS:
+• Uses Windows API (pywin32) for window management and clipboard access
+• Regex patterns for rate limit message detection
+• Threading for concurrent output monitoring and inactivity detection
+• Configurable timeouts, schedules, and terminal preferences
+• JSON-based task management with status tracking
 
 Author: João Panizzutti
+Built for the Claude Code automation community 🚀
 """
 
 import os
@@ -771,12 +820,28 @@ class TaskExecutor:
         self.detected_reset_time: Optional[str] = None
     
     def execute_task(self, task: Task) -> Task:
-        """Execute a single task and monitor for completion"""
+        \"\"\"🚀 EXECUTE TASK - Send task to Claude and monitor for completion
+        
+        This method is the core task executor that:
+        1. 📤 Sends the task command to the terminal
+        2. ⏳ Waits for Claude to start working (detects activity)
+        3. 👀 Monitors for inactivity (task completion signal)
+        4. 🚫 Detects rate limits during execution
+        5. ✅ Returns task with updated status and timing info
+        \"\"\"
+        logging.info("="*60)
+        logging.info(f"🚀 STARTING TASK EXECUTION")
+        logging.info("="*60)
+        
         self.current_task = task
         task.status = TaskStatus.RUNNING
         task.start_time = datetime.now()
         
-        logging.info(f"Executing task {task.id}: {task.content}")
+        logging.info(f"📋 Task Details:")
+        logging.info(f"   • ID: {task.id}")
+        logging.info(f"   • Content: {task.content}")
+        logging.info(f"   • Start Time: {task.start_time}")
+        logging.info(f"   • Status: {task.status.value}")
         
         # Send the task to the terminal
         if not self.terminal_manager.send_command(task.content):
@@ -1003,7 +1068,37 @@ class Scheduler:
 
 
 class TerminalAutomationSystem:
-    """The main thing that ties everything together and makes it work"""
+    \"\"\"🧠 MAIN AUTOMATION SYSTEM - The conductor of the entire orchestra
+    
+    This is the master class that coordinates all components to create a seamless
+    automation experience. Think of it as the conductor of an orchestra where:
+    
+    🎼 The Orchestra Members:
+    • TerminalManager 🖥️ - Handles terminal connections and commands
+    • TaskExecutor 🚀 - Executes tasks and monitors completion  
+    • RateLimitParser 🔍 - Detects Claude's rate limit messages
+    • Scheduler ⏰ - Manages timing and reset periods
+    • InactivityMonitor 👀 - Detects when Claude finishes working
+    
+    🎭 The Performance (Main Workflow):
+    1. 📚 Load tasks from JSON file
+    2. 🔌 Connect to terminal (existing or new)
+    3. 🔍 Check current rate limit status
+    4. 🚀 Execute tasks one by one
+    5. ⏳ Wait for completion (10min inactivity)
+    6. 🚫 Handle rate limits by waiting for reset
+    7. 🔄 Continue until all tasks done
+    
+    🎯 Key Features:
+    • Intelligent rate limit detection via clipboard/transcript
+    • Automatic waiting and resumption after rate resets
+    • Robust error handling and window management
+    • Comprehensive logging with visual indicators
+    • Support for multiple terminal types and connection modes
+    
+    This class is where the magic happens - it's the brain that makes
+    all the other components work together harmoniously.
+    \"\"\"
     
     def __init__(self, config: Configuration):
         self.config = config
@@ -1095,45 +1190,81 @@ class TerminalAutomationSystem:
             return False
     
     def _check_and_wait_for_rate_limits(self):
-        """Check for rate limits and wait if necessary - this is the core logic!"""
-        logging.info("Reading terminal content to detect rate limits...")
+        """🔍 CORE RATE LIMIT DETECTION - Check for rate limits and wait if necessary
+        
+        This is the heart of the system! It reads the current terminal content
+        and detects Claude's rate limit messages like "5-hour limit reached ∙ resets 7pm".
+        Uses different strategies based on terminal type:
+        - Existing windows: Clipboard method (reads what you see on screen)
+        - New windows: Transcript file first, clipboard fallback
+        """
+        logging.info("🔍 STARTING RATE LIMIT DETECTION")
+        logging.info(f"📊 Terminal state: existing={self.terminal_manager._is_existing_window}, process={self.terminal_manager.process is not None}")
 
         # Get the current terminal content (prefer clipboard for existing windows, transcript for new)
         terminal_content = ""
         
         if self.terminal_manager._is_existing_window:
-            # For existing windows, clipboard is most reliable - reads current screen content
+            # 📋 EXISTING WINDOW STRATEGY: Clipboard method is most reliable
+            # This reads exactly what you see on the terminal screen right now
+            logging.info("📋 Using EXISTING WINDOW strategy - clipboard method")
             try:
                 terminal_content = self._try_clipboard_copy_method() or ""
-                logging.info(f"Clipboard method returned: {len(terminal_content)} characters")
+                logging.info(f"✅ Clipboard method success: {len(terminal_content)} characters")
+                if terminal_content:
+                    # Log a sample of what we captured (first 200 chars)
+                    sample = terminal_content.replace('\n', '\\n').replace('\r', '\\r')[:200]
+                    logging.info(f"📄 Content sample: '{sample}...'")
             except Exception as e:
-                logging.warning(f"Clipboard method failed: {e}")
+                logging.error(f"❌ Clipboard method failed: {e}")
                 terminal_content = ""
         else:
-            # For new windows, try transcript first, then clipboard
+            # 📄 NEW WINDOW STRATEGY: Transcript first, clipboard fallback
+            # New windows have transcript logging, so we read the log file
+            logging.info("📄 Using NEW WINDOW strategy - transcript method first")
             try:
                 terminal_content = self._read_transcript_tail() or ""
-                logging.info(f"Transcript method returned: {len(terminal_content)} characters")
+                logging.info(f"✅ Transcript method: {len(terminal_content)} characters")
+                if terminal_content:
+                    sample = terminal_content.replace('\n', '\\n').replace('\r', '\\r')[-200:]
+                    logging.info(f"📄 Transcript sample (last 200 chars): '...{sample}'")
             except Exception as e:
-                logging.warning(f"Transcript method failed: {e}")
+                logging.error(f"❌ Transcript method failed: {e}")
                 terminal_content = ""
             
+            # 🔄 FALLBACK: If transcript failed, try clipboard
             if not terminal_content:
+                logging.info("🔄 Transcript empty, trying clipboard fallback...")
                 try:
                     terminal_content = self._try_clipboard_copy_method() or ""
-                    logging.info(f"Clipboard fallback returned: {len(terminal_content)} characters")
+                    logging.info(f"✅ Clipboard fallback: {len(terminal_content)} characters")
                 except Exception as e:
-                    logging.warning(f"Clipboard fallback failed: {e}")
+                    logging.error(f"❌ Clipboard fallback failed: {e}")
                     terminal_content = ""
         
-        # Final fallback to other methods
+        # 🔍 FINAL FALLBACK: If all primary methods failed, try other approaches
         if not terminal_content:
+            logging.warning("⚠️ All primary methods failed, trying fallback methods...")
             terminal_content = self._get_terminal_content()
-        logging.info(f"Terminal content: {terminal_content[:200]}...")  # Log first 200 chars
+        
+        # 📊 LOG WHAT WE FOUND
+        content_length = len(terminal_content) if terminal_content else 0
+        logging.info(f"📊 FINAL CONTENT ANALYSIS: {content_length} characters captured")
         
         if terminal_content:
-            # Parse the terminal content for rate limits
+            # Show a clean sample of what we're analyzing
+            clean_sample = terminal_content.replace('\n', '\\n').replace('\r', '\\r')[:300]
+            logging.info(f"📝 Content to analyze: '{clean_sample}...'")
+            
+            # 🎯 PARSE FOR RATE LIMITS - This is where the magic happens!
+            logging.info("🎯 PARSING CONTENT FOR RATE LIMIT PATTERNS...")
             rate_limit_info = self.task_executor.rate_limit_parser.parse_output(terminal_content)
+            
+            # 📋 LOG PARSING RESULTS
+            logging.info(f"📋 Rate limit detected: {rate_limit_info['rate_limit_detected']}")
+            if rate_limit_info['rate_limit_detected']:
+                logging.info(f"⏰ Reset time found: {rate_limit_info['reset_time']}")
+                logging.info(f"🔍 Matched pattern: {rate_limit_info.get('matched_pattern', 'N/A')}")
             
             if rate_limit_info['rate_limit_detected']:
                 logging.info(f"Rate limit detected: {rate_limit_info['message']}")
@@ -1503,7 +1634,22 @@ class TerminalAutomationSystem:
             return None
     
     def _try_clipboard_copy_method(self):
-        """Try to read terminal content using clipboard copy (Ctrl+A, Ctrl+C)"""
+        \"\"\"📋 CLIPBOARD METHOD - Read terminal content via Ctrl+A + Ctrl+C
+        
+        This is our most reliable method for existing windows because:
+        • 🎯 Reads exactly what you see on the terminal screen
+        • 🔄 Works with any terminal type (PowerShell, CMD, etc.)
+        • ⚡ Captures real-time content including Claude's responses
+        • ⏱️ No timing issues like transcript files
+        
+        Process:
+        1. 🎯 Focus the terminal window
+        2. 📝 Select all content (Ctrl+A)
+        3. 📋 Copy to clipboard (Ctrl+C)
+        4. 📖 Read from Windows clipboard
+        5. ✅ Return the captured text
+        \"\"\"
+        logging.info(\"📋 CLIPBOARD METHOD: Starting clipboard-based content capture\")
         try:
             hwnd = self.terminal_manager.selected_window['hwnd']
             window_title = self.terminal_manager.selected_window['title']

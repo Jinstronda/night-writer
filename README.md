@@ -1,234 +1,282 @@
-# Night Writer - The Script That Codes While You Sleep
+# 🌙 Night Writer - Automated Claude Code Assistant
 
-I wanted to run Claude Code 24/7, but there's this annoying 5-hour limit that resets at 4am. So I built this thing that automatically feeds tasks to my terminal while I'm sleeping.
+**Automate your Claude Code sessions with intelligent task scheduling and rate limit management**
 
-## The Problem I Solved
+## 🚀 Overview
 
-You know how you have this brilliant idea at 2am but Claude's rate limit kicks in? Or you want to keep coding through the night but you can't stay awake to manually send the next task? That was me. I needed something that would:
+Night Writer is a sophisticated Python automation system that manages Claude Code sessions, automatically executing tasks from a JSON file while intelligently handling rate limits and scheduling. It's designed to maximize your Claude usage by working around the 5-hour daily limits.
 
-- Keep my terminal running tasks all night
-- Automatically detect when a task is done (no more manual "next task" clicking)
-- Respect the 5-hour limits and 4am resets
-- Work with whatever terminal I already have open
-- Just work without me babysitting it
+### ✨ Key Features
 
-## What This Actually Does
+- 🎯 **Smart Rate Limit Detection** - Automatically detects "5-hour limit reached ∙ resets Xpm" messages
+- ⏰ **Intelligent Scheduling** - Waits for rate limit resets and continues automatically
+- 🖥️ **Multi-Terminal Support** - Works with existing or new terminal windows
+- 📋 **Clipboard-Based Reading** - Reads exactly what you see on screen for maximum reliability
+- 🔄 **Continuous Operation** - Never stops due to rate limits, just waits and continues
+- 📝 **Comprehensive Logging** - Detailed logs with emojis for easy monitoring
+- 🛡️ **Robust Error Handling** - Gracefully handles window closures, network issues, etc.
 
-This script is basically a robot that types commands into your terminal and waits for them to finish. It's smarter than it sounds:
+## 🏗️ Architecture
 
-- **Finds your existing terminal** - No need to close what you're working on
-- **Types tasks automatically** - Reads from a simple JSON file
-- **Knows when you're done** - Waits for silence, then moves to the next task
-- **Respects limits** - Stops at 5 hours, waits until 4am, then starts again
-- **Works with anything** - PowerShell, CMD, Bash, whatever you're using
+### Core Components
 
-## Getting Started (It's Actually Simple)
+1. **TerminalAutomationSystem** 🧠 - Main orchestrator that coordinates everything
+2. **TerminalManager** 🖥️ - Handles terminal connections and command sending
+3. **TaskExecutor** 🚀 - Executes individual tasks and monitors completion
+4. **RateLimitParser** 🔍 - Detects rate limit messages in terminal output
+5. **Scheduler** ⏰ - Manages timing, resets, and session limits
+6. **InactivityMonitor** 👀 - Detects when Claude finishes working (10min silence)
 
-### Install the Thing
+### How It Works
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Load Tasks    │───▶│  Connect to     │───▶│  Check Rate     │
+│   from JSON     │    │  Terminal       │    │  Limits         │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                        │
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│  Wait for Reset │◀───│  Rate Limited?  │◀───│  Send Task to   │
+│  Time & Resume  │    │  (5hr limit)    │    │  Claude         │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+                                                        │
+                       ┌─────────────────┐    ┌─────────────────┐
+                       │  Task Complete? │◀───│  Monitor for    │
+                       │  (10min quiet)  │    │  Inactivity     │
+                       └─────────────────┘    └─────────────────┘
+                                │
+                       ┌─────────────────┐
+                       │  Next Task or   │
+                       │  Session End    │
+                       └─────────────────┘
+```
+
+## 📦 Installation
+
+### Prerequisites
+
+- Python 3.9+
+- Windows 10/11 (uses Windows-specific APIs)
+- Claude Code installed and accessible via `claude` command
+
+### Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-That's it. The script needs `psutil` and `pywin32` (on Windows) to work.
+### Required Packages
 
-### Set Up Your Tasks
+```
+psutil>=5.9.0
+pywin32>=306
+Pillow>=10.0.0
+easyocr>=1.7.0
+pygetwindow>=0.0.9
+pyautogui>=0.9.54
+```
 
-Create a `tasks.txt` file with your commands. I use JSON because it's clean:
+## 🎮 Usage
 
+### Quick Start
+
+1. **Create your tasks file** (`tasks.txt`):
 ```json
 [
-  "Keep going",
-  "Go to the next task", 
-  "Test everything, document, and clean the code",
-  "Keep going",
-  "Go to the next task"
+    "Implement user authentication system",
+    "Add error handling to API endpoints", 
+    "Create unit tests for core functions",
+    "Optimize database queries",
+    "Update documentation"
 ]
 ```
 
-Or just plain text - one command per line. Whatever works for you.
-
-### Run It
-
-**The lazy way** (uses your existing terminal):
+2. **Run the system**:
 ```bash
-python night_writer_cli.py --test-mode
+python night_writer_cli.py
 ```
 
-**The "I want to see what it does" way**:
-```bash
-python night_writer_cli.py --connection-mode existing_window --test-mode
+3. **Follow the interactive setup**:
+   - Choose terminal type (PowerShell recommended)
+   - Select connection mode (existing window recommended)
+   - Enter your project folder path
+   - Select your terminal window
+
+### Configuration Options
+
+#### Terminal Types
+- **PowerShell** (recommended) - Full feature support
+- **CMD** - Basic support
+- **Bash/Zsh/Fish** - Linux/WSL support
+
+#### Connection Modes
+- **Existing Window** (recommended) - Connect to your current Claude session
+- **New Window** - Create a fresh terminal with transcript logging
+- **Auto Detect** - Let the system choose
+
+### Advanced Usage
+
+#### Custom Configuration
+
+```python
+config = Configuration(
+    terminal_type=TerminalType.POWERSHELL,
+    connection_mode=TerminalConnectionMode.EXISTING_WINDOW,
+    tasks_file="my_tasks.json",
+    inactivity_timeout=600,  # 10 minutes
+    timezone="America/New_York"
+)
 ```
 
-This will show you all your open terminals and let you pick which one to use.
-
-## The Options (You Probably Don't Need Most of These)
-
-The script has a bunch of options, but honestly, the defaults work fine. Here are the ones you might actually care about:
-
-```bash
-# Use your existing terminal (recommended)
-python night_writer_cli.py --connection-mode existing_window
-
-# Run just one session to test it
-python night_writer_cli.py --test-mode
-
-# Change when it starts (default is 4am)
-python night_writer_cli.py --start-time "22:00"
-
-# Make it wait longer before moving to next task (default is 10 minutes)
-python night_writer_cli.py --inactivity-timeout 300
-
-# See what it's configured to do
-python night_writer_cli.py --show-config
-```
-
-The full list is there if you need it, but I've never used most of these options. The script just works.
-
-## How It Actually Works
-
-The script is pretty straightforward once you understand what it's doing:
-
-1. **Finds your terminal** - Either creates a new one or connects to what you already have open
-2. **Waits for the right time** - Default is 4am (when Claude's limits reset)
-3. **Types your tasks** - One by one, from your JSON file
-4. **Listens for silence** - When your terminal stops outputting stuff for 10 minutes, it assumes you're done
-5. **Moves to the next task** - Rinse and repeat
-6. **Stops at 5 hours** - Respects the rate limit, then waits until 4am again
-
-The clever part is that it doesn't need to understand what your commands do. It just types them and waits for quiet. Simple but effective.
-
-## Your Task File
-
-Put your commands in `tasks.txt`. I use JSON because it's clean:
-
-```json
-[
-  "Keep going",
-  "Go to the next task",
-  "Test everything, document, and clean the code",
-  "Keep going"
-]
-```
-
-Or just plain text if you prefer:
-```
-Keep going
-Go to the next task  
-Test everything, document, and clean the code
-Keep going
-```
-
-## The Code (If You're Curious)
-
-I built this with a few main pieces:
-
-- **TerminalManager** - Handles finding and talking to your terminal
-- **TaskExecutor** - Types commands and waits for them to finish  
-- **InactivityMonitor** - Knows when you're done (listens for silence)
-- **Scheduler** - Handles the 4am resets and 5-hour limits
-- **TerminalAutomationSystem** - The main thing that ties it all together
-
-The cool part is that it works with existing terminals. On Windows, it uses the Windows API to find your open terminal windows and send keystrokes to them. No need to close what you're working on.
-
-### Connection Modes
-
-- **`existing_window`** - Uses whatever terminal you already have open (recommended)
-- **`new_window`** - Creates a fresh terminal (old behavior)
-- **`auto_detect`** - Tries existing first, falls back to new (default)
-
-## What It Saves
-
-The script saves everything it does in the `night_writer_outputs` folder:
-
-- **Your original tasks** - What it typed
-- **Terminal output** - What your terminal responded with
-- **Errors** - If something went wrong
-- **Timing info** - How long each task took
-
-Useful for debugging, but honestly I rarely look at these files. The script just works.
-
-## Testing (If You Want to Be Sure)
-
-I wrote a bunch of tests because I'm paranoid about things breaking:
+#### Command Line Arguments
 
 ```bash
-python test_terminal_automation.py
+python night_writer_cli.py --project-path "C:\MyProject" --tasks custom_tasks.json
 ```
 
-24 tests covering everything from basic functionality to edge cases. They all pass, which means the script actually works.
+## 🔧 Configuration
 
-## Real Examples
+### Default Settings
 
-**The most common way I use it:**
+```python
+@dataclass
+class Configuration:
+    terminal_type: TerminalType = TerminalType.POWERSHELL
+    connection_mode: TerminalConnectionMode = TerminalConnectionMode.EXISTING_WINDOW
+    tasks_file: str = "tasks.txt"
+    inactivity_timeout: int = 600  # 10 minutes
+    session_limit_hours: int = 5
+    reset_time_hour: int = 4  # 4 AM
+    timezone: str = "America/New_York"
+    log_level: str = "INFO"
+    auto_launch_claude: bool = True
+    transcript_enabled: bool = True
+    claude_command: str = "claude --dangerously-skip-permissions"
+```
+
+## 🔍 Rate Limit Detection
+
+The system uses multiple strategies to detect Claude's rate limits:
+
+### Primary Method: Clipboard Reading
+- 📋 Captures exactly what you see on screen
+- ⚡ Real-time, no timing delays
+- 🎯 Most reliable for existing windows
+
+### Fallback Method: Transcript Files
+- 📄 Reads PowerShell transcript logs
+- 🔄 Good for new windows
+- ⏱️ May have slight delays
+
+### Detection Patterns
+The system looks for messages like:
+- `5-hour limit reached ∙ resets 7pm`
+- `Usage limit reached ∙ resets at 4am`
+- `Rate limit exceeded ∙ resets 11pm`
+
+## 📊 Logging
+
+Comprehensive logging with visual indicators:
+
+```
+🚀 NIGHT WRITER AUTOMATION SYSTEM STARTING
+📋 Configuration Details:
+   • Terminal Type: powershell
+   • Connection Mode: existing_window
+   • Tasks File: tasks.txt
+
+🔍 STARTING RATE LIMIT DETECTION
+📋 Using EXISTING WINDOW strategy - clipboard method
+✅ Clipboard method success: 2847 characters
+📝 Content to analyze: '> Implement user authentication...'
+
+🎯 PARSING CONTENT FOR RATE LIMIT PATTERNS...
+📋 Rate limit detected: false
+
+🚀 STARTING TASK EXECUTION
+📋 Task Details:
+   • ID: 0
+   • Content: Implement user authentication system
+   • Status: running
+```
+
+### Log Files
+- `night_writer_detailed.log` - Comprehensive logs with rotation (10MB max)
+- Includes function names, line numbers, and timestamps
+- 5 backup files maintained automatically
+
+## 🛠️ Troubleshooting
+
+### Common Issues
+
+#### "No terminal windows found"
+- Ensure you have a terminal open (PowerShell, CMD, etc.)
+- Try running as administrator
+- Check Windows permissions
+
+#### "Rate limit not detected"
+- Verify the terminal content is visible
+- Try the clipboard method manually (Ctrl+A, Ctrl+C)
+- Check if Claude is actually showing rate limit messages
+
+#### "Window activation failed"
+- Try clicking on the terminal manually first
+- Ensure no other applications are blocking window focus
+- Run with administrator privileges
+
+#### "Clipboard method failed"
+- Some terminals may not support Ctrl+A properly
+- Try switching terminal types
+- Manually test Ctrl+A, Ctrl+C in your terminal
+
+### Debug Mode
+
+Enable verbose logging:
+
+```python
+config.log_level = "DEBUG"
+```
+
+Or set environment variable:
 ```bash
-python night_writer_cli.py --connection-mode existing_window --test-mode
+set LOG_LEVEL=DEBUG
+python night_writer_cli.py
 ```
 
-**When I want to start earlier (like 10pm instead of 4am):**
-```bash
-python night_writer_cli.py --start-time "22:00"
-```
+## 🔒 Security Considerations
 
-**When I'm impatient and want it to move faster between tasks:**
-```bash
-python night_writer_cli.py --inactivity-timeout 300  # 5 minutes instead of 10
-```
+- Uses `--dangerously-skip-permissions` flag for Claude (required for automation)
+- Reads clipboard content (only from selected terminal)
+- Accesses Windows API for window management
+- All operations are local to your machine
 
-**When I want to see what it's going to do:**
-```bash
-python night_writer_cli.py --show-config
-```
+## 🤝 Contributing
 
-That's it. I don't really use the other options. The defaults work fine for my use case.
+1. Fork the repository
+2. Create a feature branch
+3. Add comprehensive logging and comments
+4. Test with different terminal types
+5. Submit a pull request
 
-## When Things Go Wrong
+### Code Style
 
-**"It can't find my terminal"**
-- Make sure you have a terminal open before running the script
-- Try `--connection-mode new_window` to force a new terminal
+- Use emoji comments for major sections (🚀, 📋, 🔍, etc.)
+- Comprehensive docstrings for all methods
+- Detailed logging with context
+- Type hints for all functions
 
-**"It's not waiting long enough"**
-- Your tasks might take longer than 10 minutes. Try `--inactivity-timeout 1800` (30 minutes)
+## 📄 License
 
-**"It's not starting at the right time"**
-- Check your timezone with `--show-config`
-- The default is 4am, which is when Claude's limits reset
+MIT License - see LICENSE file for details
 
-**"Something's broken"**
-- Run with `--log-level DEBUG` to see what's happening
-- Check the `terminal_automation.log` file
+## 🙏 Acknowledgments
 
-Most issues are just configuration problems. The script is pretty robust.
-
-## The Files
-
-```
-night-writer/
-├── terminal_automation.py    # The main script that does the work
-├── night_writer_cli.py       # Command line interface (what you actually run)
-├── test_terminal_automation.py # Tests (because I'm paranoid)
-├── tasks.txt                # Your tasks go here
-├── requirements.txt         # What you need to install
-└── README.md               # This file
-```
-
-## Why I Built This
-
-I was tired of manually clicking "next task" every few minutes when working with Claude Code. The 5-hour limit was annoying, and I wanted to keep coding through the night without staying awake.
-
-So I built this script that:
-- Automatically types commands into my terminal
-- Waits for them to finish (by listening for silence)
-- Moves to the next task
-- Respects the rate limits and resets
-
-It's not fancy, but it works. Now I can set it up before bed and wake up to a bunch of completed tasks.
-
-## License
-
-MIT License - use it however you want.
+- Built for the Claude Code community
+- Inspired by the need for automated AI assistance
+- Special thanks to all beta testers
 
 ---
 
-*Built by João Panizzutti because I wanted to code while sleeping.*
+**Happy Automating! 🌙✨**
+
+*Night Writer - Because your code doesn't sleep*
