@@ -4,7 +4,11 @@ Test the fixed system with proper delays and rate limit detection
 """
 
 import time
+import sys
+import codecs
 from terminal_automation import RateLimitParser, InactivityMonitor
+
+sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
 
 def test_inactivity_monitor():
     """Test that the inactivity monitor works properly"""

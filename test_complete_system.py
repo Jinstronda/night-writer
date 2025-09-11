@@ -5,7 +5,11 @@ Complete system test for Night Writer with rate limit detection
 
 import json
 import time
+import sys
+import codecs
 from terminal_automation import RateLimitParser, TerminalAutomationSystem, Configuration
+
+sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
 
 def test_rate_limit_detection():
     """Test the rate limit parser with the exact format"""

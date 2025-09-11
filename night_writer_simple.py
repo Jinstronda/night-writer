@@ -209,9 +209,10 @@ class NightWriterSimple:
             return
             
         try:
-            self.log("🚀 Starting automation...")
+            self.log("Starting automation...")
             self.set_status("Starting automation...", DesignSystem.PRIMARY_500)
             
+            self.log("Creating configuration...")
             # Create config with defaults
             config = Configuration(
                 tasks_file="tasks.txt",  # Default tasks file
@@ -219,9 +220,11 @@ class NightWriterSimple:
                 auto_launch_claude=True
             )
             
+            self.log("Initializing automation system...")
             # Create automation system
             self.automation_system = TerminalAutomationSystem(config)
             
+            self.log("Configuring for existing window...")
             # Configure for existing window
             self.automation_system.terminal_manager.selected_window = self.selected_window
             self.automation_system.terminal_manager._is_existing_window = True
@@ -232,17 +235,22 @@ class NightWriterSimple:
             self.automation_system.terminal_manager.initial_working_dir = project_path
             self.automation_system._auto_open_claude = True
             
+            self.log("Loading tasks...")
             # Load tasks
             if not self.automation_system.load_tasks(config.tasks_file):
                 messagebox.showerror("Error", f"Failed to load tasks from {config.tasks_file}")
                 return
                 
+            self.log(f"Loaded {len(self.automation_system.tasks)} tasks successfully")
+            
+            # Set up progress callback so automation system can update GUI
+            self.automation_system.progress_callback = self.on_automation_progress
+            
             # Update UI state
             self.is_running = True
-            self.start_button.config(state=tk.DISABLED, text="🚀 RUNNING...", bg=DesignSystem.SUCCESS_500)
+            self.start_button.config(state=tk.DISABLED, text="RUNNING...", bg=DesignSystem.SUCCESS_500)
             
-            self.log(f"📋 Loaded tasks from {config.tasks_file}")
-            self.log("🔗 Connecting to terminal...")
+            self.log("Starting automation thread...")
             
             # Start automation thread
             self.automation_thread = threading.Thread(target=self.run_automation, daemon=True)
@@ -256,26 +264,52 @@ class NightWriterSimple:
     def run_automation(self):
         """Run automation in background"""
         try:
-            self.gui_queue.put(("log", "🔄 Executing automation...", None))
-            self.gui_queue.put(("status", "Running automation...", DesignSystem.PRIMARY_500))
+            self.gui_queue.put(("log", "Starting automation workflow...", None))
+            self.gui_queue.put(("status", "Starting automation...", DesignSystem.PRIMARY_500))
+            
+            self.gui_queue.put(("log", "Connecting to selected terminal...", None))
+            self.gui_queue.put(("log", "Checking for rate limits...", None))
+            self.gui_queue.put(("log", "Beginning task execution...", None))
             
             # Run the EXISTING automation system
             success = self.automation_system.run_session()
             
             if success:
-                self.gui_queue.put(("log", "✅ Automation completed successfully!", None))
-                self.gui_queue.put(("status", "✅ Automation completed!", DesignSystem.SUCCESS_500))
+                self.gui_queue.put(("log", "All tasks completed successfully!", None))
+                self.gui_queue.put(("status", "Automation completed!", DesignSystem.SUCCESS_500))
             else:
-                self.gui_queue.put(("log", "⏹️ Automation stopped", None))
-                self.gui_queue.put(("status", "⏹️ Automation stopped", DesignSystem.TEXT_SECONDARY))
+                self.gui_queue.put(("log", "Automation stopped or failed", None))
+                self.gui_queue.put(("status", "Automation stopped", DesignSystem.TEXT_SECONDARY))
                 
         except Exception as e:
-            self.gui_queue.put(("log", f"❌ Automation error: {str(e)}", None))
-            self.gui_queue.put(("status", f"❌ Error: {str(e)}", DesignSystem.ERROR_500))
+            self.gui_queue.put(("log", f"Automation error: {str(e)}", None))
+            self.gui_queue.put(("status", f"Error: {str(e)}", DesignSystem.ERROR_500))
             
         finally:
             self.gui_queue.put(("finished", None, None))
             
+    def on_automation_progress(self, event_type, message, data=None):
+        """Handle progress updates from automation system"""
+        if event_type == "task_start":
+            task_index = data.get("task_index", 0) if data else 0
+            task_text = data.get("task_text", message) if data else message
+            self.gui_queue.put(("log", f"🚀 Task {task_index + 1}: {task_text}", None))
+            self.gui_queue.put(("status", f"Executing task {task_index + 1}...", DesignSystem.PRIMARY_500))
+        elif event_type == "task_complete":
+            task_index = data.get("task_index", 0) if data else 0
+            self.gui_queue.put(("log", f"✅ Task {task_index + 1} completed", None))
+        elif event_type == "waiting":
+            self.gui_queue.put(("log", f"⏳ {message}", None))
+            self.gui_queue.put(("status", f"Waiting: {message}", DesignSystem.TEXT_SECONDARY))
+        elif event_type == "rate_limit":
+            self.gui_queue.put(("log", f"⏱️ {message}", None))
+            self.gui_queue.put(("status", f"Rate limited: {message}", DesignSystem.ERROR_500))
+        elif event_type == "idle":
+            self.gui_queue.put(("log", f"💤 {message}", None))
+            self.gui_queue.put(("status", f"Idle: {message}", DesignSystem.TEXT_SECONDARY))
+        else:
+            self.gui_queue.put(("log", f"📄 {message}", None))
+    
     def reset_ui(self):
         """Reset UI to initial state"""
         self.is_running = False

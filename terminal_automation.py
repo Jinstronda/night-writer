@@ -1258,10 +1258,16 @@ class TerminalAutomationSystem:
                     logging.error(f"❌ Clipboard fallback failed: {e}")
                     terminal_content = ""
         
-        # 🔍 FINAL FALLBACK: If all primary methods failed, try other approaches
+        # 🔍 FINAL FALLBACK: For existing windows, do NOT use command-based methods
         if not terminal_content:
-            logging.warning("⚠️ All primary methods failed, trying fallback methods...")
-            terminal_content = self._get_terminal_content()
+            if self.terminal_manager._is_existing_window:
+                logging.warning("⚠️ All clipboard methods failed for existing window - skipping command fallbacks")
+                # For existing windows, we should NOT send any commands for rate limit detection
+                # The user chose this window because Claude is already running
+                terminal_content = ""
+            else:
+                logging.warning("⚠️ All primary methods failed, trying fallback methods...")
+                terminal_content = self._get_terminal_content()
         
         # 📊 LOG WHAT WE FOUND
         content_length = len(terminal_content) if terminal_content else 0
@@ -1298,11 +1304,11 @@ class TerminalAutomationSystem:
                     logging.info("📝 All content was log messages - treating as empty")
                     terminal_content = ""
             
-            # 🎯 PARSE FOR RATE LIMITS - Only check RECENT lines (last 5 lines)
+            # 🎯 PARSE FOR RATE LIMITS - Only check RECENT lines (last 15 lines)
             if terminal_content:
-                # Only check the last 5 lines for rate limit messages
+                # Only check the last 15 lines for rate limit messages
                 lines = terminal_content.split('\n')
-                recent_lines = lines[-5:] if len(lines) > 5 else lines
+                recent_lines = lines[-15:] if len(lines) > 15 else lines
                 recent_content = '\n'.join(recent_lines).strip()
                 
                 logging.info(f"🎯 PARSING ONLY RECENT LINES ({len(recent_lines)} lines) FOR RATE LIMIT PATTERNS...")
@@ -1557,6 +1563,11 @@ class TerminalAutomationSystem:
     
     def _try_simple_command(self):
         """Try to send a simple command to read terminal content"""
+        # For existing windows, do NOT send any commands - user selected this window because Claude is already active
+        if self.terminal_manager._is_existing_window:
+            logging.info("Skipping simple command for existing window (would send unwanted commands)")
+            return None
+            
         try:
             # Since we can successfully send commands, let's use a command that shows recent history
             # This will show the terminal content including any rate limit messages
@@ -1873,6 +1884,11 @@ class TerminalAutomationSystem:
     
     def _try_powershell_command(self):
         """Try to send a PowerShell command to read terminal content"""
+        # For existing windows, do NOT send any commands - user selected this window because Claude is already active
+        if self.terminal_manager._is_existing_window:
+            logging.info("Skipping PowerShell command for existing window (would send unwanted commands)")
+            return None
+            
         try:
             # Try PowerShell command with better error handling
             capture_command = "echo TERMINAL_STATE && powershell -Command \"Get-Content -Path 'con' -Tail 10\""
@@ -2112,7 +2128,7 @@ class TerminalAutomationSystem:
                 if content:
                     # Only check recent lines for rate limits
                     lines = content.split('\n')
-                    recent_lines = lines[-5:] if len(lines) > 5 else lines
+                    recent_lines = lines[-15:] if len(lines) > 15 else lines
                     recent_content = '\n'.join(recent_lines).strip()
                     
                     logging.info(f"Checking recent content for rate limits: {len(recent_lines)} lines")
@@ -2251,9 +2267,8 @@ class TerminalAutomationSystem:
             initial_dir = getattr(self, "_initial_project_dir", None)
             auto_open = getattr(self, "_auto_open_claude", True)
             if initial_dir and self.terminal_manager._is_existing_window:
-                cd_cmd = f"cd '{initial_dir}'"
-                self.terminal_manager.send_command(cd_cmd)
-                time.sleep(0.5)
+                # Skip cd command for existing windows - they're already in the right place
+                logging.info(f"Skipping cd command for existing window (would have been: cd '{initial_dir}')")
                 
                 # For existing windows, check if Claude is already active before launching
                 if auto_open and self.config.auto_launch_claude:
