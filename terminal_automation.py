@@ -143,6 +143,7 @@ class Configuration:
     transcript_path: Optional[str] = None  # Defaults to ~/Documents/session.log when None
     auto_launch_claude: bool = True
     claude_command: str = "claude --dangerously-skip-permissions"
+    gui_mode: bool = False  # If True, creates hidden terminals for GUI-only operation
 
 
 class RateLimitParser:
@@ -506,8 +507,9 @@ class TerminalManager:
             logging.warning("Existing window connection only supported on Windows")
             return False
         
-        # Always show terminal selection menu
-        self.selected_window = self.window_manager.select_terminal_window(auto_select=False)
+        # Check if window already selected from GUI, otherwise show selection menu
+        if not self.selected_window:
+            self.selected_window = self.window_manager.select_terminal_window(auto_select=False)
         
         if self.selected_window is None:
             logging.info("No existing window selected, will create new window")
@@ -538,8 +540,18 @@ class TerminalManager:
                 command = " ".join(pre)
                 return ps + [command]
 
-            # Decide stdio redirection: for NEW_WINDOW, show visible console output by not capturing stdout/stderr
-            capture_output = (self.connection_mode != TerminalConnectionMode.NEW_WINDOW)
+            # Decide stdio redirection and console visibility
+            config = self._get_config()
+            gui_mode = getattr(config, 'gui_mode', False)
+            
+            # For GUI mode: always capture output and hide console
+            # For regular NEW_WINDOW: show visible console, don't capture
+            if gui_mode:
+                capture_output = True
+                show_console = False
+            else:
+                capture_output = (self.connection_mode != TerminalConnectionMode.NEW_WINDOW)
+                show_console = True
 
             if self.terminal_type == TerminalType.CMD:
                 self.process = subprocess.Popen(
@@ -550,7 +562,7 @@ class TerminalManager:
                     text=True,
                     bufsize=0,
                     cwd=self.initial_working_dir or None,
-                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    creationflags=(getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if show_console else 0)
                 )
                 # Attach window info for clipboard and focus
                 try:
@@ -575,7 +587,7 @@ class TerminalManager:
                     text=True,
                     bufsize=0,
                     cwd=self.initial_working_dir or None,
-                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    creationflags=(getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if show_console else 0)
                 )
                 # Try to bring the created window to foreground if possible
                 try:
@@ -601,7 +613,7 @@ class TerminalManager:
                     text=True,
                     bufsize=0,
                     cwd=self.initial_working_dir or None,
-                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+                    creationflags=(getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if show_console else 0)
                 )
                 # Attach window info and focus
                 try:
@@ -811,16 +823,17 @@ class TerminalManager:
 class TaskExecutor:
     """The worker that types your tasks and waits for them to finish"""
     
-    def __init__(self, terminal_manager: TerminalManager, inactivity_monitor: InactivityMonitor):
+    def __init__(self, terminal_manager: TerminalManager, inactivity_monitor: InactivityMonitor, automation_system=None):
         self.terminal_manager = terminal_manager
         self.inactivity_monitor = inactivity_monitor
+        self.automation_system = automation_system  # Reference to main system for rate limit checks
         self.current_task: Optional[Task] = None
         self.rate_limit_parser = RateLimitParser()
         self.rate_limit_detected = False
         self.detected_reset_time: Optional[str] = None
     
     def execute_task(self, task: Task) -> Task:
-        \"\"\"🚀 EXECUTE TASK - Send task to Claude and monitor for completion
+        """🚀 EXECUTE TASK - Send task to Claude and monitor for completion
         
         This method is the core task executor that:
         1. 📤 Sends the task command to the terminal
@@ -828,7 +841,7 @@ class TaskExecutor:
         3. 👀 Monitors for inactivity (task completion signal)
         4. 🚫 Detects rate limits during execution
         5. ✅ Returns task with updated status and timing info
-        \"\"\"
+        """
         logging.info("="*60)
         logging.info(f"🚀 STARTING TASK EXECUTION")
         logging.info("="*60)
@@ -907,14 +920,17 @@ class TaskExecutor:
                 if claude_started:
                     self.inactivity_monitor.update_activity()
             
-            # For existing windows, periodically check for rate limits
+            # For existing windows, periodically check for rate limits ONLY when Claude is inactive
+            # Don't interrupt Claude while it's actively working!
             if (self.terminal_manager._is_existing_window and 
-                time.time() - last_rate_limit_check > 60):  # Check every minute
+                claude_started and  # Only check after Claude starts
+                self.inactivity_monitor.is_inactive() and  # Only when Claude is inactive
+                time.time() - last_rate_limit_check > 60):  # Check every minute during inactivity
                 last_rate_limit_check = time.time()
-                logging.debug("Checking for rate limits in existing terminal...")
+                logging.debug("Claude appears inactive - checking for rate limits...")
                 
-                # Use the new rate limit checking method
-                if self._check_rate_limit_during_task():
+                # Use the new rate limit checking method from the main automation system
+                if self.automation_system and self.automation_system._check_rate_limit_during_task():
                     task.status = TaskStatus.RATE_LIMITED
                     task.output = "\n".join(output_lines)
                     logging.info("Rate limit detected during task execution - marking task as RATE_LIMITED")
@@ -1068,7 +1084,7 @@ class Scheduler:
 
 
 class TerminalAutomationSystem:
-    \"\"\"🧠 MAIN AUTOMATION SYSTEM - The conductor of the entire orchestra
+    """🧠 MAIN AUTOMATION SYSTEM - The conductor of the entire orchestra
     
     This is the master class that coordinates all components to create a seamless
     automation experience. Think of it as the conductor of an orchestra where:
@@ -1098,13 +1114,13 @@ class TerminalAutomationSystem:
     
     This class is where the magic happens - it's the brain that makes
     all the other components work together harmoniously.
-    \"\"\"
+    """
     
     def __init__(self, config: Configuration):
         self.config = config
         self.terminal_manager = TerminalManager(config.terminal_type, config.connection_mode)
         self.inactivity_monitor = InactivityMonitor(config.inactivity_timeout)
-        self.task_executor = TaskExecutor(self.terminal_manager, self.inactivity_monitor)
+        self.task_executor = TaskExecutor(self.terminal_manager, self.inactivity_monitor, self)
         self.scheduler = Scheduler(config)
         self.tasks: List[Task] = []
         self._setup_logging()
@@ -1256,9 +1272,46 @@ class TerminalAutomationSystem:
             clean_sample = terminal_content.replace('\n', '\\n').replace('\r', '\\r')[:300]
             logging.info(f"📝 Content to analyze: '{clean_sample}...'")
             
-            # 🎯 PARSE FOR RATE LIMITS - This is where the magic happens!
-            logging.info("🎯 PARSING CONTENT FOR RATE LIMIT PATTERNS...")
-            rate_limit_info = self.task_executor.rate_limit_parser.parse_output(terminal_content)
+            # 🧹 FILTER OUT LOG MESSAGES - Don't parse our own logs!
+            if "- root - INFO -" in terminal_content or "night_writer" in terminal_content.lower():
+                logging.warning("⚠️ Detected log content in terminal - filtering out to avoid parsing own logs")
+                # Try to extract only the actual terminal content, not log messages
+                lines = terminal_content.split('\n')
+                filtered_lines = []
+                for line in lines:
+                    # Skip log lines and system messages
+                    if not any(pattern in line for pattern in [
+                        "- root - INFO -", "- root - ERROR -", "- root - WARNING -",
+                        "night_writer", "STARTING RATE LIMIT", "CLIPBOARD METHOD",
+                        "[_", "] -", "📋", "🔍", "⏰", "🚀", "Reset time:"
+                    ]):
+                        filtered_lines.append(line)
+                
+                filtered_content = '\n'.join(filtered_lines).strip()
+                if filtered_content:
+                    logging.info(f"📝 Filtered content (removed logs): {len(filtered_content)} chars")
+                    terminal_content = filtered_content
+                    # Show sample of filtered content
+                    clean_sample = terminal_content.replace('\n', '\\n').replace('\r', '\\r')[:300]
+                    logging.info(f"📝 Filtered content sample: '{clean_sample}...'")
+                else:
+                    logging.info("📝 All content was log messages - treating as empty")
+                    terminal_content = ""
+            
+            # 🎯 PARSE FOR RATE LIMITS - Only check RECENT lines (last 5 lines)
+            if terminal_content:
+                # Only check the last 5 lines for rate limit messages
+                lines = terminal_content.split('\n')
+                recent_lines = lines[-5:] if len(lines) > 5 else lines
+                recent_content = '\n'.join(recent_lines).strip()
+                
+                logging.info(f"🎯 PARSING ONLY RECENT LINES ({len(recent_lines)} lines) FOR RATE LIMIT PATTERNS...")
+                logging.info(f"📄 Recent content: '{recent_content.replace(chr(10), '\\n')[:200]}...'")
+                
+                rate_limit_info = self.task_executor.rate_limit_parser.parse_output(recent_content)
+            else:
+                logging.info("🎯 No content to parse - no rate limit detected")
+                rate_limit_info = {'rate_limit_detected': False, 'reset_time': None}
             
             # 📋 LOG PARSING RESULTS
             logging.info(f"📋 Rate limit detected: {rate_limit_info['rate_limit_detected']}")
@@ -1634,7 +1687,7 @@ class TerminalAutomationSystem:
             return None
     
     def _try_clipboard_copy_method(self):
-        \"\"\"📋 CLIPBOARD METHOD - Read terminal content via Ctrl+A + Ctrl+C
+        """📋 CLIPBOARD METHOD - Read terminal content via Ctrl+A + Ctrl+C
         
         This is our most reliable method for existing windows because:
         • 🎯 Reads exactly what you see on the terminal screen
@@ -1648,13 +1701,18 @@ class TerminalAutomationSystem:
         3. 📋 Copy to clipboard (Ctrl+C)
         4. 📖 Read from Windows clipboard
         5. ✅ Return the captured text
-        \"\"\"
-        logging.info(\"📋 CLIPBOARD METHOD: Starting clipboard-based content capture\")
+        """
+        logging.info("📋 CLIPBOARD METHOD: Starting clipboard-based content capture")
         try:
             hwnd = self.terminal_manager.selected_window['hwnd']
             window_title = self.terminal_manager.selected_window['title']
             
             logging.info(f"Using clipboard method for window: {window_title}")
+            
+            # 🚨 SAFETY CHECK - Don't read from log files or our own output
+            if any(keyword in window_title.lower() for keyword in ["log", "night_writer", "powershell transcript"]):
+                logging.warning(f"⚠️ Window '{window_title}' appears to be a log file - skipping clipboard read")
+                return None
             
             # First, ensure the window is visible and focused
             try:
@@ -2047,21 +2105,20 @@ class TerminalAutomationSystem:
             # We'll send a command that will show the current terminal content
             # and then try to capture it
             
-            # Send a command to get the current terminal content
-            # This will show the last few lines of the terminal
-            check_command = "echo '=== RATE LIMIT CHECK ===' && echo 'Last 10 lines:' && powershell -Command \"Get-Content -Path 'con' -Tail 10\""
-            
-            if self.terminal_manager.send_command(check_command):
-                time.sleep(3)  # Wait for command to execute
-                
-                # Try to get any output (this might not work for existing windows)
-                output = self.terminal_manager.get_output()
-                if output:
-                    content = "\n".join(output)
-                    logging.debug(f"Rate limit check output: {content}")
+            # For existing windows, use clipboard method without sending ANY commands
+            logging.info("Using clipboard method for rate limit detection (no commands)")
+            try:
+                content = self._try_clipboard_copy_method() or ""
+                if content:
+                    # Only check recent lines for rate limits
+                    lines = content.split('\n')
+                    recent_lines = lines[-5:] if len(lines) > 5 else lines
+                    recent_content = '\n'.join(recent_lines).strip()
                     
-                    # Check for rate limits in the output
-                    rate_limit_info = self.task_executor.rate_limit_parser.parse_output(content)
+                    logging.info(f"Checking recent content for rate limits: {len(recent_lines)} lines")
+                    
+                    # Check for rate limits in the recent content
+                    rate_limit_info = self.task_executor.rate_limit_parser.parse_output(recent_content)
                     if rate_limit_info['rate_limit_detected']:
                         self.task_executor.rate_limit_detected = True
                         self.task_executor.detected_reset_time = rate_limit_info['reset_time']
@@ -2069,19 +2126,9 @@ class TerminalAutomationSystem:
                         if rate_limit_info['reset_time']:
                             logging.info(f"Reset time detected during task: {rate_limit_info['reset_time']}")
                         return True
-                
-                # If we can't read output, we'll use a different approach
-                # We'll send a command that might trigger a rate limit response
-                # and then check if the command was successful
-                logging.debug("Cannot read output from existing terminal - using alternative rate limit detection")
-                
-                # Send a simple command to check if we get a rate limit response
-                test_command = "echo 'Testing rate limit...'"
-                if self.terminal_manager.send_command(test_command):
-                    time.sleep(2)
-                    # If we can't read the response, we'll assume no rate limit for now
-                    # This is a limitation of existing window mode
-                    logging.debug("Rate limit check completed (no output readable)")
+                        
+            except Exception as e:
+                logging.warning(f"Error reading clipboard during rate limit check: {e}")
                 
             return False
             
@@ -2129,6 +2176,67 @@ class TerminalAutomationSystem:
             logging.error(f"Failed to save task output: {e}")
             return ""
     
+    def _is_claude_already_active(self) -> bool:
+        """Check if Claude is already active in the existing terminal window WITHOUT sending commands"""
+        try:
+            logging.info("Checking if Claude is already active in terminal (no commands)...")
+            
+            # For existing windows, just read current content without sending ANY commands
+            terminal_content = ""
+            
+            # Try to read the current terminal content
+            if self.terminal_manager._is_existing_window:
+                # Use clipboard method for existing windows (reads what's currently visible)
+                try:
+                    terminal_content = self._try_clipboard_copy_method() or ""
+                    logging.info(f"Read {len(terminal_content)} characters from clipboard")
+                except:
+                    terminal_content = ""
+            else:
+                # For new windows, try transcript first
+                try:
+                    terminal_content = self._get_transcript_content() or ""
+                except:
+                    terminal_content = ""
+                
+            if terminal_content:
+                # Look for Claude-specific indicators in recent terminal content
+                # Only check last few lines to avoid old content
+                lines = terminal_content.split('\n')
+                recent_lines = lines[-10:] if len(lines) > 10 else lines
+                recent_content = '\n'.join(recent_lines).lower()
+                
+                claude_indicators = [
+                    "claude",  # Claude command or interface
+                    "anthropic",  # Anthropic references
+                    "bypass permissions",  # Claude Code specific
+                    "alt+m to cycle",  # Claude Code specific
+                ]
+                
+                for indicator in claude_indicators:
+                    if indicator in recent_content:
+                        logging.info(f"Claude detected via indicator: {indicator}")
+                        return True
+                
+                # Check for active command prompt
+                if any(pattern in recent_content for pattern in ["ps ", "c:\\", "> ", "$ "]):
+                    logging.info("Active terminal detected, assuming Claude is available")
+                    return True
+                
+            logging.info("Claude activity not detected in current content")
+            # For existing windows, assume Claude is probably available
+            if self.terminal_manager._is_existing_window:
+                logging.info("Existing window - assuming Claude is available to avoid disruption")
+                return True
+            return False
+            
+        except Exception as e:
+            logging.warning(f"Error checking Claude status: {e}")
+            # For existing windows, assume it's active to avoid disruption
+            if self.terminal_manager._is_existing_window:
+                return True
+            return False
+    
     def run_session(self) -> bool:
         """Run a complete automation session"""
         try:
@@ -2146,9 +2254,15 @@ class TerminalAutomationSystem:
                 cd_cmd = f"cd '{initial_dir}'"
                 self.terminal_manager.send_command(cd_cmd)
                 time.sleep(0.5)
+                
+                # For existing windows, check if Claude is already active before launching
                 if auto_open and self.config.auto_launch_claude:
-                    self.terminal_manager.send_command(self.config.claude_command)
-                    time.sleep(0.5)
+                    if self._is_claude_already_active():
+                        logging.info("Claude is already active in existing window, skipping launch")
+                    else:
+                        logging.info("Claude not detected, launching in existing window")
+                        self.terminal_manager.send_command(self.config.claude_command)
+                        time.sleep(0.5)
             
             # ALWAYS check for rate limits FIRST - this is the key!
             logging.info("Reading terminal to detect current rate limit status...")

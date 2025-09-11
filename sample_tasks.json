@@ -1,0 +1,53 @@
+[
+    {
+        "title": "List Current Directory",
+        "description": "Display the contents of the current directory",
+        "type": "command",
+        "command": "dir",
+        "working_directory": "."
+    },
+    {
+        "title": "Check Python Version",
+        "description": "Display the current Python version",
+        "type": "command",
+        "command": "python --version"
+    },
+    {
+        "title": "Create Test File",
+        "description": "Create a simple test file with content",
+        "type": "file_operation",
+        "operation": "create",
+        "file_path": "test_output.txt",
+        "content": "This is a test file created by Night Writer!\nTimestamp: Generated during automation test\n"
+    },
+    {
+        "title": "Read Test File",
+        "description": "Read the contents of the test file we created",
+        "type": "file_operation",
+        "operation": "read",
+        "file_path": "test_output.txt"
+    },
+    {
+        "title": "Execute Python Script",
+        "description": "Run a simple inline Python script",
+        "type": "script",
+        "script": "import datetime\nprint(f'Current time: {datetime.datetime.now()}')\nprint('Night Writer automation is working!')\n"
+    },
+    {
+        "title": "Test API Call",
+        "description": "Make a simple API call to test connectivity",
+        "type": "api_call",
+        "url": "https://httpbin.org/get",
+        "method": "GET",
+        "headers": {
+            "User-Agent": "Night-Writer/1.0"
+        }
+    },
+    {
+        "title": "Cleanup Test File",
+        "description": "Remove the test file we created",
+        "type": "file_operation",
+        "operation": "delete",
+        "file_path": "test_output.txt"
+    }
+]

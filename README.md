@@ -78,7 +78,30 @@ pyautogui>=0.9.54
 
 ## 🎮 Usage
 
-### Quick Start
+### 🖥️ GUI Version (Recommended)
+
+**The easiest way to use Night Writer:**
+
+1. **Double-click to launch**:
+   - Windows: `Night Writer GUI.bat`
+   - Other: `python night_writer_gui.py`
+
+2. **Simple point-and-click interface**:
+   - 🖥️ Select your terminal window from the list
+   - 📁 Browse for your project folder
+   - 📄 Choose your tasks file
+   - 🚀 Click "Start Automation"
+
+3. **Features**:
+   - Real-time status updates
+   - Live log viewing
+   - Easy configuration
+   - Start/stop controls
+   - Task progress tracking
+
+### 📝 Command Line Version
+
+For advanced users who prefer terminal interfaces:
 
 1. **Create your tasks file** (`tasks.txt`):
 ```json
