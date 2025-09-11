@@ -1,8 +1,0 @@
-[
-  "Go to the next task in the list of pending features or fixes for the financial dashboard",
-  "Clean the codebase: remove unused variables, functions, and files; ensure consistent formatting; and add clear inline documentation and module-level explanations",
-  "Go to the next task in the list of pending features or fixes for the financial dashboard",
-  "Run a complete test of the financial dashboard workflow end-to-end: connect to data sources, process data, and render charts; log any errors and store the test results",
-  "Go to the next task in the list of pending features or fixes for the financial dashboard",
-  "Iterate on the financial dashboard workflow until data ingestion, processing, and visualization run reliably without manual intervention; document setup and usage in the README"
-]
