@@ -1,103 +1,130 @@
-# 🌙 Night Writer - Automated Claude Code Assistant
+# 🌙 Night Writer v1.1 - Intelligent Terminal Automation
 
-**Automate your Claude Code sessions with intelligent task scheduling and rate limit management**
+**Automate your Claude.ai tasks with smart file management and auto-advance features**
 
-## 🚀 Overview
+## 🚀 What is Night Writer?
 
-Night Writer is a sophisticated Python automation system that manages Claude Code sessions, automatically executing tasks from a JSON file while intelligently handling rate limits and scheduling. It's designed to maximize your Claude usage by working around the 5-hour daily limits.
+Night Writer is an intelligent terminal automation system that monitors your clipboard, detects when you copy tasks from Claude.ai, automatically executes them in your selected terminal window, and manages your task list by removing completed items. It features smart auto-advance to prevent getting stuck and comprehensive task file management.
 
 ### ✨ Key Features
 
-- 🎯 **Smart Rate Limit Detection** - Automatically detects "5-hour limit reached ∙ resets Xpm" messages
-- ⏰ **Intelligent Scheduling** - Waits for rate limit resets and continues automatically
-- 🖥️ **Multi-Terminal Support** - Works with existing or new terminal windows
-- 📋 **Clipboard-Based Reading** - Reads exactly what you see on screen for maximum reliability
-- 🔄 **Continuous Operation** - Never stops due to rate limits, just waits and continues
-- 📝 **Comprehensive Logging** - Detailed logs with emojis for easy monitoring
-- 🛡️ **Robust Error Handling** - Gracefully handles window closures, network issues, etc.
+- 🗑️ **Automatic Task File Management** - Completed tasks automatically deleted from tasks.txt
+- ⏰ **Smart Auto-Advance** - 2-minute rule prevents getting stuck on unresponsive tasks
+- 🎯 **Intelligent Rate Limit Detection** - Distinguishes old vs current rate limits using timestamps
+- 📋 **Terminal Content Monitoring** - Detects when Claude starts working and continues monitoring
+- 📝 **Comprehensive Task Logging** - Clear visibility of task initiation, progress, and completion
+- 🖥️ **Multi-Terminal Support** - Works with existing terminal windows (PowerShell, CMD, etc.)
+- 🔄 **Real-Time Progress Updates** - Live status updates in GUI with detailed logging
+- 💿 **Standalone Executable** - 62MB optimized build, no Python installation required
 
-## 🏗️ Architecture
+## 🔄 How It Works
 
-### Core Components
-
-1. **TerminalAutomationSystem** 🧠 - Main orchestrator that coordinates everything
-2. **TerminalManager** 🖥️ - Handles terminal connections and command sending
-3. **TaskExecutor** 🚀 - Executes individual tasks and monitors completion
-4. **RateLimitParser** 🔍 - Detects rate limit messages in terminal output
-5. **Scheduler** ⏰ - Manages timing, resets, and session limits
-6. **InactivityMonitor** 👀 - Detects when Claude finishes working (10min silence)
-
-### How It Works
+Night Writer automates your Claude.ai workflow with intelligent monitoring and management:
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Load Tasks    │───▶│  Connect to     │───▶│  Check Rate     │
-│   from JSON     │    │  Terminal       │    │  Limits         │
+│   Load Tasks    │───▶│  Select Terminal│───▶│  Send Task to   │
+│   from tasks.txt│    │  Window         │    │  Claude         │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                                         │
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│  Wait for Reset │◀───│  Rate Limited?  │◀───│  Send Task to   │
-│  Time & Resume  │    │  (5hr limit)    │    │  Claude         │
+│  Remove from    │◀───│  Task Complete? │◀───│  Monitor Terminal│
+│  tasks.txt      │    │  (10min/2min)   │    │  Content Changes│
 └─────────────────┘    └─────────────────┘    └─────────────────┘
-                                                        │
-                       ┌─────────────────┐    ┌─────────────────┐
-                       │  Task Complete? │◀───│  Monitor for    │
-                       │  (10min quiet)  │    │  Inactivity     │
-                       └─────────────────┘    └─────────────────┘
                                 │
                        ┌─────────────────┐
                        │  Next Task or   │
-                       │  Session End    │
+                       │  All Done       │
                        └─────────────────┘
 ```
 
+### Smart Features
+
+- **Terminal Change Detection**: Knows Claude is working when content changes
+- **2-Minute Auto-Advance**: Prevents getting stuck on unresponsive tasks  
+- **Rate Limit Intelligence**: Only waits for future reset times, ignores expired ones
+- **File Management**: Automatically removes completed tasks from tasks.txt
+
 ## 📦 Installation
 
-### Prerequisites
+### 🚀 Option 1: Standalone Executable (Recommended)
 
+**No installation required!**
+
+1. **Download the distribution package**:
+   - Get the `Night Writer Distribution/` folder
+   - Contains: `Night Writer Optimized.exe`, `tasks.txt`, `README.txt`
+
+2. **Run immediately**:
+   ```
+   Double-click "Night Writer Optimized.exe"
+   ```
+
+3. **Requirements**:
+   - Windows 10/11
+   - No Python installation needed
+   - No dependencies to install
+
+### 🐍 Option 2: Python Source (Advanced Users)
+
+**For developers who want to modify the code:**
+
+#### Prerequisites
 - Python 3.9+
 - Windows 10/11 (uses Windows-specific APIs)
 - Claude Code installed and accessible via `claude` command
 
-### Install Dependencies
-
+#### Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### Required Packages
-
+#### Required Packages
 ```
 psutil>=5.9.0
 pywin32>=306
 Pillow>=10.0.0
-easyocr>=1.7.0
+easyocr>=1.7.0  # Optional - for OCR features
 pygetwindow>=0.0.9
 pyautogui>=0.9.54
 ```
 
 ## 🎮 Usage
 
-### 🖥️ GUI Version (Recommended)
+### 🚀 Standalone Executable (Recommended)
 
 **The easiest way to use Night Writer:**
 
-1. **Double-click to launch**:
-   - Windows: `Night Writer GUI.bat`
-   - Other: `python night_writer_gui.py`
+1. **Launch the application**:
+   ```
+   Double-click "Night Writer Optimized.exe"
+   ```
 
-2. **Simple point-and-click interface**:
+2. **Simple 2-button interface**:
+   - 🔄 Click "REFRESH WINDOWS" to scan for terminals
    - 🖥️ Select your terminal window from the list
-   - 📁 Browse for your project folder
-   - 📄 Choose your tasks file
-   - 🚀 Click "Start Automation"
+   - 🚀 Click "START AUTOMATION" to begin
 
 3. **Features**:
-   - Real-time status updates
-   - Live log viewing
-   - Easy configuration
-   - Start/stop controls
-   - Task progress tracking
+   - Real-time task progress updates
+   - Live status monitoring in log area
+   - Current task execution display
+   - Rate limit detection and waiting
+   - Idle state monitoring
+
+### 🖥️ Python GUI Version (Advanced)
+
+**For developers using the Python source:**
+
+1. **Launch via Python**:
+   ```bash
+   python night_writer_simple.py
+   ```
+
+2. **Advanced configuration options**:
+   - 📁 Custom project folder selection
+   - 📄 Different tasks file
+   - 🔧 Terminal type selection
 
 ### 📝 Command Line Version
 
@@ -230,12 +257,23 @@ Comprehensive logging with visual indicators:
 
 ## 🛠️ Troubleshooting
 
-### Common Issues
+### Standalone Executable Issues
 
 #### "No terminal windows found"
-- Ensure you have a terminal open (PowerShell, CMD, etc.)
-- Try running as administrator
-- Check Windows permissions
+- Ensure you have a terminal open (PowerShell, CMD, Windows Terminal, etc.)
+- Click "REFRESH WINDOWS" button to scan again
+- Try running the exe as administrator
+
+#### "Application won't start"
+- Check Windows permissions - exe needs access to clipboard and window management
+- Some antivirus software may block the executable (false positive)
+- Try moving the exe to a different folder
+
+#### "Tasks file not found"
+- Ensure `tasks.txt` is in the same folder as the exe
+- Edit `tasks.txt` with your own tasks in JSON format
+
+### General Issues
 
 #### "Rate limit not detected"
 - Verify the terminal content is visible
@@ -266,12 +304,35 @@ set LOG_LEVEL=DEBUG
 python night_writer_cli.py
 ```
 
+## 🚀 Performance & Optimization
+
+### Executable Optimization
+
+The standalone executable has been heavily optimized:
+
+- **Original build**: 3.09 GB 
+- **Optimized build**: 62 MB
+- **95% size reduction achieved!**
+
+#### Optimization Techniques Used:
+- 🔥 Conditional imports for heavy ML dependencies
+- 📦 Excluded unnecessary packages (PyTorch, TensorFlow, etc.)
+- 🎯 Retained all core functionality
+- ⚡ Fast startup and minimal resource usage
+
+### Performance Features:
+- 🚀 Real-time progress updates
+- 📊 Efficient clipboard monitoring
+- 🔄 Smart rate limit detection
+- 💾 Minimal memory footprint
+
 ## 🔒 Security Considerations
 
 - Uses `--dangerously-skip-permissions` flag for Claude (required for automation)
 - Reads clipboard content (only from selected terminal)
 - Accesses Windows API for window management
 - All operations are local to your machine
+- Standalone executable is self-contained with no external dependencies
 
 ## 🤝 Contributing
 

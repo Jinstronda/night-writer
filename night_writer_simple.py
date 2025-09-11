@@ -213,10 +213,10 @@ class NightWriterSimple:
             self.set_status("Starting automation...", DesignSystem.PRIMARY_500)
             
             self.log("Creating configuration...")
-            # Create config with defaults
+            # Create config with defaults  
             config = Configuration(
                 tasks_file="tasks.txt",  # Default tasks file
-                inactivity_timeout=600,
+                inactivity_timeout=600,  # 10 minutes - good timeout
                 auto_launch_claude=True
             )
             

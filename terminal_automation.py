@@ -82,8 +82,14 @@ import win32api
 import win32process
 import win32clipboard
 from PIL import ImageGrab
-import easyocr
 import pygetwindow as gw
+
+# Optional OCR import - only used as fallback
+try:
+    import easyocr
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
 import pyautogui
 
 
@@ -156,7 +162,13 @@ class RateLimitParser:
             r"5-hour limit reached.*∙.*resets",
             r"rate limit reached.*resets",
             r"limit reached.*resets",
-            r"quota exceeded.*resets"
+            r"quota exceeded.*resets",
+            r"usage limit.*resets",
+            r"daily limit.*resets",
+            r"hourly limit.*resets",
+            r"you've reached.*limit.*resets",
+            r"limit.*exceeded.*resets",
+            r"too many requests.*resets"
         ]
         
         # Patterns to extract reset times from the specific format
@@ -174,23 +186,42 @@ class RateLimitParser:
         result = {
             'rate_limit_detected': False,
             'reset_time': None,
-            'message': None
+            'message': None,
+            'matched_pattern': None
         }
         
         output_lower = output.lower()
         
         # Check for rate limit messages
         for pattern in self.rate_limit_patterns:
-            if re.search(pattern, output_lower):
+            match = re.search(pattern, output_lower)
+            if match:
                 result['rate_limit_detected'] = True
                 result['message'] = output.strip()
+                result['matched_pattern'] = pattern
+                
+                # Log the match for debugging
+                logging.info(f"🎯 Rate limit pattern matched: '{pattern}'")
+                logging.info(f"📄 Matched text: '{match.group(0)}'")
                 break
         
         # Extract reset time if rate limit detected
         if result['rate_limit_detected']:
             reset_time = self._extract_reset_time(output)
             if reset_time:
+                # Validate if this is a current or old rate limit message
+                is_current = self._is_rate_limit_current(reset_time)
                 result['reset_time'] = reset_time
+                result['is_current'] = is_current
+                
+                if is_current:
+                    logging.info(f"⏰ Successfully extracted CURRENT reset time: {reset_time}")
+                else:
+                    logging.warning(f"🕐 EXPIRED rate limit detected - reset time {reset_time} already passed")
+                    logging.warning("🚫 This appears to be an OLD rate limit message in terminal history")
+                    result['rate_limit_detected'] = False  # Treat as no rate limit
+            else:
+                logging.warning(f"⚠️ Failed to extract reset time from: '{output.strip()}'")
         
         return result
     
@@ -228,6 +259,76 @@ class RateLimitParser:
                 return f"{hour}:{minute} {am_pm}"
         
         return None
+    
+    def _is_rate_limit_current(self, reset_time_str: str) -> bool:
+        """
+        Determine if a rate limit reset time is current (future) or expired (past)
+        
+        Logic:
+        - If reset time is in the future (today), it's current
+        - If reset time was earlier today and we're past it, it's expired
+        - If reset time appears to be yesterday/past, it's expired
+        
+        Examples at 2:43 PM:
+        - "7pm" -> current (future today)
+        - "5am" -> expired (was 9+ hours ago)
+        - "4am" -> expired (was 10+ hours ago)
+        """
+        from datetime import datetime, time
+        import pytz
+        
+        try:
+            # Parse the reset time
+            reset_time_str = reset_time_str.lower().strip()
+            
+            # Extract hour and am/pm
+            if 'am' in reset_time_str:
+                hour_str = reset_time_str.replace('am', '').strip().split(':')[0]
+                is_pm = False
+            elif 'pm' in reset_time_str:
+                hour_str = reset_time_str.replace('pm', '').strip().split(':')[0]
+                is_pm = True
+            else:
+                logging.warning(f"Unknown time format: {reset_time_str}")
+                return True  # Assume current if we can't parse
+            
+            # Parse hour
+            try:
+                hour = int(hour_str)
+            except ValueError:
+                logging.warning(f"Could not parse hour from: {hour_str}")
+                return True  # Assume current if we can't parse
+            
+            # Convert to 24-hour format
+            if is_pm and hour != 12:
+                hour += 12
+            elif not is_pm and hour == 12:
+                hour = 0
+            
+            # Get current time in Eastern timezone (Claude's timezone)
+            eastern = pytz.timezone('America/New_York')
+            now = datetime.now(eastern)
+            current_hour = now.hour
+            
+            logging.info(f"🕐 Time analysis: Reset={hour:02d}:00, Current={current_hour:02d}:{now.minute:02d}")
+            
+            # If reset hour is in the future today, it's current
+            if hour > current_hour:
+                logging.info(f"✅ Reset time {reset_time_str} is FUTURE (current rate limit)")
+                return True
+            
+            # If reset hour is same as current hour, check minutes for safety
+            if hour == current_hour:
+                logging.info(f"⚠️ Reset time {reset_time_str} is CURRENT HOUR - treating as current")
+                return True
+            
+            # If reset hour is in the past today, it's expired
+            logging.info(f"🕐 Reset time {reset_time_str} was {current_hour - hour} hours ago (EXPIRED)")
+            return False
+            
+        except Exception as e:
+            logging.warning(f"Error parsing reset time '{reset_time_str}': {e}")
+            return True  # Assume current if parsing fails
 
 
 class TerminalWindowManager:
@@ -856,14 +957,34 @@ class TaskExecutor:
         logging.info(f"   • Start Time: {task.start_time}")
         logging.info(f"   • Status: {task.status.value}")
         
+        # Capture initial terminal content before sending command (for existing windows)
+        initial_content = ""
+        if self.terminal_manager._is_existing_window:
+            try:
+                # Get baseline content before sending command
+                initial_content = self.automation_system._try_clipboard_copy_method() or ""
+                logging.info(f"Captured initial terminal content: {len(initial_content)} characters")
+            except Exception as e:
+                logging.warning(f"Could not capture initial content: {e}")
+        
         # Send the task to the terminal
         if not self.terminal_manager.send_command(task.content):
             task.status = TaskStatus.FAILED
             task.error = "Failed to send command to terminal"
             return task
         
-        # Wait for Claude to start working (not immediately start inactivity monitoring)
-        logging.info("Waiting for Claude to start working...")
+        # Log that task was sent successfully
+        logging.info(f"✅ Task {task.id} sent to terminal: {task.content}")
+        
+        # Notify progress callback that task started
+        if self.automation_system and self.automation_system.progress_callback:
+            self.automation_system.progress_callback("task_start", task.content, {
+                "task_index": task.id, 
+                "task_text": task.content
+            })
+        
+        # Wait for Claude to start working by detecting terminal content changes
+        logging.info("Waiting for Claude to start working (monitoring for terminal changes)...")
         claude_started = False
         start_time = time.time()
         last_rate_limit_check = time.time()
@@ -877,7 +998,49 @@ class TaskExecutor:
                 task.error = "Terminal process terminated unexpectedly"
                 break
             
-            # Collect output
+            # For existing windows, check if terminal content has changed
+            if self.terminal_manager._is_existing_window:
+                try:
+                    current_content = self.automation_system._try_clipboard_copy_method() or ""
+                    
+                    # If not started yet, check if Claude started working
+                    if not claude_started:
+                        # If content changed from initial state
+                        if current_content != initial_content and len(current_content) > len(initial_content):
+                            # Check if it's a rate limit change
+                            rate_limit_info = self.rate_limit_parser.parse_output(current_content)
+                            
+                            if not rate_limit_info['rate_limit_detected']:
+                                # Content changed and it's NOT a rate limit = Claude is working!
+                                claude_started = True
+                                logging.info(f"✅ Terminal content changed ({len(current_content)} chars, was {len(initial_content)}) - Claude is working!")
+                                self.inactivity_monitor.reset()
+                                self.inactivity_monitor.update_activity()
+                                logging.info(f"🕐 Starting inactivity monitoring - timeout: {self.inactivity_monitor.timeout_seconds} seconds")
+                                # Store current content as baseline for future change detection
+                                self.last_content = current_content
+                            else:
+                                logging.info("Terminal changed but detected rate limit - not starting monitoring yet")
+                    else:
+                        # Claude already started - check for NEW content changes to update activity
+                        if hasattr(self, 'last_content') and current_content != self.last_content:
+                            if len(current_content) != len(self.last_content):
+                                # Content changed = Claude is still active
+                                logging.info(f"📝 Terminal content updated ({len(current_content)} chars, was {len(self.last_content)}) - Claude still working, resetting inactivity timer")
+                                self.inactivity_monitor.update_activity()
+                                self.last_content = current_content
+                                # Reset 2-minute check timer
+                                self.last_2min_check = time.time()
+                        elif not hasattr(self, 'last_content'):
+                            # Initialize last_content if not set
+                            self.last_content = current_content
+                            # Initialize 2-minute check timer
+                            self.last_2min_check = time.time()
+                            
+                except Exception as e:
+                    logging.debug(f"Error checking terminal content change: {e}")
+            
+            # Collect output from new windows
             new_output = self.terminal_manager.get_output()
             new_errors = self.terminal_manager.get_errors()
             
@@ -885,19 +1048,21 @@ class TaskExecutor:
                 output_lines.extend(new_output)
                 logging.debug(f"Task {task.id} output: {new_output}")
                 
-                # Check if Claude has started working (look for typical Claude output patterns)
-                full_output = "\n".join(output_lines).lower()
-                claude_working_indicators = [
-                    "thinking", "analyzing", "processing", "generating", "writing",
-                    "creating", "building", "implementing", "coding", "working"
-                ]
-                
-                if not claude_started and any(indicator in full_output for indicator in claude_working_indicators):
-                    claude_started = True
-                    logging.info("Claude has started working - beginning inactivity monitoring")
-                    self.inactivity_monitor.reset()  # Reset inactivity monitor now
+                # For new windows, check if Claude has started working (look for typical Claude output patterns)
+                if not self.terminal_manager._is_existing_window and not claude_started:
+                    full_output = "\n".join(output_lines).lower()
+                    claude_working_indicators = [
+                        "thinking", "analyzing", "processing", "generating", "writing",
+                        "creating", "building", "implementing", "coding", "working"
+                    ]
+                    
+                    if any(indicator in full_output for indicator in claude_working_indicators):
+                        claude_started = True
+                        logging.info("Claude has started working - beginning inactivity monitoring")
+                        self.inactivity_monitor.reset()  # Reset inactivity monitor now
                 
                 # Check for rate limit messages in the output
+                full_output = "\n".join(output_lines)
                 rate_limit_info = self.rate_limit_parser.parse_output(full_output)
                 if rate_limit_info['rate_limit_detected']:
                     self.rate_limit_detected = True
@@ -937,13 +1102,70 @@ class TaskExecutor:
                     break
             
             # Check for inactivity timeout only after Claude starts working
-            if claude_started and self.inactivity_monitor.is_inactive():
-                task.status = TaskStatus.COMPLETED
-                task.output = "\n".join(output_lines)
-                if error_lines:
-                    task.error = "\n".join(error_lines)
-                logging.info(f"Task {task.id} completed due to inactivity timeout (10 minutes of silence)")
-                break
+            if claude_started:
+                is_inactive = self.inactivity_monitor.is_inactive()
+                time_since_activity = time.time() - self.inactivity_monitor.last_activity
+                
+                # Check for 2-minute auto-advance (existing windows only)
+                if (self.terminal_manager._is_existing_window and 
+                    hasattr(self, 'last_2min_check') and 
+                    time.time() - self.last_2min_check >= 120):  # 2 minutes = 120 seconds
+                    
+                    # Check if terminal content changed in the last 2 minutes
+                    try:
+                        current_content = self.automation_system._try_clipboard_copy_method() or ""
+                        if hasattr(self, 'last_content') and current_content == self.last_content:
+                            # No change in 2 minutes - auto-advance to next task
+                            logging.info(f"⏰ No terminal changes in 2 minutes - auto-advancing from task {task.id}")
+                            task.status = TaskStatus.COMPLETED
+                            task.output = "\n".join(output_lines)
+                            task.error = "Auto-advanced due to no terminal changes in 2 minutes"
+                            
+                            # Remove completed task from tasks file
+                            if self.automation_system:
+                                self.automation_system.remove_completed_task(task)
+                            
+                            # Notify progress callback
+                            if self.automation_system and self.automation_system.progress_callback:
+                                self.automation_system.progress_callback("task_complete", f"Task {task.id} auto-advanced", {
+                                    "task_index": task.id,
+                                    "reason": "2-minute timeout"
+                                })
+                            
+                            break
+                        else:
+                            # Content did change, reset the 2-minute timer
+                            self.last_content = current_content
+                            self.last_2min_check = time.time()
+                            logging.debug("Terminal content changed within 2-minute window - continuing")
+                    except Exception as e:
+                        logging.debug(f"Error during 2-minute check: {e}")
+                        # Reset timer anyway to avoid spam
+                        self.last_2min_check = time.time()
+                
+                # Log every 30 seconds to track progress
+                if int(time.time() - start_time) % 30 == 0:
+                    logging.info(f"Task {task.id} status: inactive={is_inactive}, time_since_activity={time_since_activity:.1f}s, timeout={self.inactivity_monitor.timeout_seconds}s")
+                
+                if is_inactive:
+                    task.status = TaskStatus.COMPLETED
+                    task.output = "\n".join(output_lines)
+                    if error_lines:
+                        task.error = "\n".join(error_lines)
+                    logging.info(f"Task {task.id} completed due to inactivity timeout ({self.inactivity_monitor.timeout_seconds} seconds of silence)")
+                    
+                    # Remove completed task from tasks file
+                    if self.automation_system:
+                        self.automation_system.remove_completed_task(task)
+                    
+                    break
+            
+            # For new windows, if Claude hasn't started after 5 minutes, assume it started anyway
+            if (not claude_started and not self.terminal_manager._is_existing_window and 
+                time.time() - start_time > 300):  # 5 minutes
+                claude_started = True
+                logging.warning("Claude hasn't shown activity indicators after 5 minutes - assuming it started")
+                self.inactivity_monitor.reset()
             
             # Check for maximum execution time (safety timeout)
             if time.time() - start_time > 3600:  # 1 hour max per task
@@ -1205,6 +1427,50 @@ class TerminalAutomationSystem:
             logging.error(f"Failed to load tasks: {e}")
             return False
     
+    def remove_completed_task(self, completed_task: Task) -> bool:
+        """Remove a completed task from the tasks file"""
+        try:
+            tasks_path = Path(self.config.tasks_file)
+            if not tasks_path.exists():
+                logging.warning(f"Tasks file not found when trying to remove task: {tasks_path}")
+                return False
+            
+            # Read current tasks from file
+            content = tasks_path.read_text(encoding="utf-8").strip()
+            if not content:
+                logging.warning("Tasks file is empty when trying to remove task")
+                return False
+            
+            # Parse current tasks
+            if content.lstrip().startswith("["):
+                task_strings = json.loads(content)
+            else:
+                task_strings = [line.strip() for line in content.splitlines() if line.strip()]
+            
+            # Remove the completed task
+            if completed_task.content in task_strings:
+                task_strings.remove(completed_task.content)
+                logging.info(f"🗑️ Removed completed task from file: {completed_task.content}")
+                
+                # Write updated tasks back to file
+                if task_strings:
+                    # Still have tasks remaining
+                    updated_content = json.dumps(task_strings, indent=2, ensure_ascii=False)
+                else:
+                    # No tasks remaining
+                    updated_content = "[]"
+                    logging.info("🎉 All tasks completed! Tasks file now empty.")
+                
+                tasks_path.write_text(updated_content, encoding="utf-8")
+                return True
+            else:
+                logging.warning(f"Task not found in file when trying to remove: {completed_task.content}")
+                return False
+                
+        except Exception as e:
+            logging.error(f"Failed to remove completed task from file: {e}")
+            return False
+    
     def _check_and_wait_for_rate_limits(self):
         """🔍 CORE RATE LIMIT DETECTION - Check for rate limits and wait if necessary
         
@@ -1216,6 +1482,23 @@ class TerminalAutomationSystem:
         """
         logging.info("🔍 STARTING RATE LIMIT DETECTION")
         logging.info(f"📊 Terminal state: existing={self.terminal_manager._is_existing_window}, process={self.terminal_manager.process is not None}")
+
+        # Send a refresh message to wake up Claude and get fresh status
+        if self.terminal_manager._is_existing_window:
+            try:
+                logging.info("💤 Sending refresh message to wake up Claude before rate limit detection...")
+                
+                # Send a simple command to refresh Claude's status display
+                self.terminal_manager.send_command("# Checking Claude status")
+                time.sleep(1)  # Give Claude time to respond
+                
+                # Notify progress callback if available
+                if self.progress_callback:
+                    self.progress_callback("waiting", "Refreshing Claude status before detection", None)
+                
+                logging.info("✅ Refresh message sent successfully")
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to send refresh message (continuing anyway): {e}")
 
         # Get the current terminal content (prefer clipboard for existing windows, transcript for new)
         terminal_content = ""
@@ -1321,28 +1604,65 @@ class TerminalAutomationSystem:
             
             # 📋 LOG PARSING RESULTS
             logging.info(f"📋 Rate limit detected: {rate_limit_info['rate_limit_detected']}")
-            if rate_limit_info['rate_limit_detected']:
-                logging.info(f"⏰ Reset time found: {rate_limit_info['reset_time']}")
-                logging.info(f"🔍 Matched pattern: {rate_limit_info.get('matched_pattern', 'N/A')}")
             
             if rate_limit_info['rate_limit_detected']:
-                logging.info(f"Rate limit detected: {rate_limit_info['message']}")
-                if rate_limit_info['reset_time']:
-                    logging.info(f"Reset time: {rate_limit_info['reset_time']}")
+                # Check if this is a current or expired rate limit
+                is_current = rate_limit_info.get('is_current', True)
+                
+                if not is_current:
+                    # This is an old/expired rate limit message
+                    logging.info("=" * 80)
+                    logging.info("🕐 OLD RATE LIMIT MESSAGE DETECTED (EXPIRED)")
+                    logging.info("=" * 80)
+                    logging.info(f"📋 Original message: {rate_limit_info.get('message', 'N/A')}")
+                    logging.info(f"⏰ Reset time (expired): {rate_limit_info['reset_time']}")
+                    logging.info("✅ Claude should be available now - proceeding with tasks")
+                    logging.info("=" * 80)
                     
-                    # Update scheduler with detected reset time
-                    self.scheduler.update_rate_limit_info(
-                        rate_limit_info['rate_limit_detected'],
-                        rate_limit_info['reset_time']
-                    )
-                    
-                    # Wait for the detected reset time
-                    logging.info("Waiting for rate limit reset...")
-                    self.scheduler.wait_until_reset()
+                    # Notify progress callback that we found an old message
+                    if self.progress_callback:
+                        self.progress_callback("waiting", f"Found expired rate limit from {rate_limit_info['reset_time']} - Claude available", None)
                 else:
-                    logging.warning("Rate limit detected but no reset time found")
+                    # ⚠️ MAJOR ALERT: Current rate limit detected!
+                    logging.warning("=" * 80)
+                    logging.warning("🚨 CLAUDE RATE LIMIT DETECTED! 🚨")
+                    logging.warning("=" * 80)
+                    logging.warning(f"📋 Original message: {rate_limit_info.get('message', 'N/A')}")
+                    logging.warning(f"⏰ Reset time detected: {rate_limit_info['reset_time']}")
+                    logging.warning(f"🔍 Matched pattern: {rate_limit_info.get('matched_pattern', 'N/A')}")
+                    
+                    # Notify progress callback with prominent alert
+                    if self.progress_callback:
+                        reset_time_msg = f"resets at {rate_limit_info['reset_time']}" if rate_limit_info['reset_time'] else "time unknown"
+                        self.progress_callback("rate_limit", f"Claude rate limit detected - {reset_time_msg}", None)
+                
+                # Only wait if the rate limit is current (not expired)
+                if is_current:
+                    if rate_limit_info['reset_time']:
+                        logging.warning(f"🕐 System will wait until Claude resets at: {rate_limit_info['reset_time']}")
+                        logging.warning("=" * 80)
+                        
+                        # Update scheduler with detected reset time
+                        self.scheduler.update_rate_limit_info(
+                            rate_limit_info['rate_limit_detected'],
+                            rate_limit_info['reset_time']
+                        )
+                        
+                        # Wait for the detected reset time
+                        logging.info("Waiting for rate limit reset...")
+                        self.scheduler.wait_until_reset()
+                    else:
+                        logging.error("🚨 CRITICAL: Rate limit detected but NO RESET TIME found!")
+                        logging.error("📄 Full terminal content for debugging:")
+                        logging.error(repr(terminal_content))
+                        logging.warning("Using default 4am reset time as fallback")
+                        self.scheduler.update_rate_limit_info(True, "4am")
+                        self.scheduler.wait_until_reset()
+                else:
+                    # Expired rate limit - don't wait, continue with tasks
+                    logging.info("🚀 Continuing with task execution (rate limit has passed)")
             else:
-                logging.info("No rate limit detected in terminal content - ready to start tasks")
+                logging.info("✅ No rate limit detected in terminal content - ready to start tasks")
         else:
             # If we can't read terminal content, we should still check if there's a rate limit
             # by looking at the current time and seeing if we should wait
@@ -2082,15 +2402,23 @@ class TerminalAutomationSystem:
                 return None
             
             # Initialize EasyOCR reader (English only for better performance)
+            if not HAS_OCR:
+                logging.info("EasyOCR not available, skipping OCR method")
+                return None
+                
             logging.info("Initializing EasyOCR...")
             reader = easyocr.Reader(['en'], gpu=False)  # Use CPU for better compatibility
             
             # Perform OCR on the screenshot
             logging.info("Performing OCR on screenshot...")
             # Convert PIL Image to numpy array for EasyOCR
-            import numpy as np
-            screenshot_array = np.array(screenshot)
-            results = reader.readtext(screenshot_array)
+            try:
+                import numpy as np
+                screenshot_array = np.array(screenshot)
+                results = reader.readtext(screenshot_array)
+            except ImportError:
+                logging.info("NumPy not available, skipping OCR method")
+                return None
             
             # Extract text from OCR results
             extracted_text = []
