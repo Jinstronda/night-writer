@@ -1,4 +1,7 @@
 # Night Writer
+<img width="1024" height="1024" alt="Generated Image September 11, 2025 - 3_49PM" src="https://github.com/user-attachments/assets/1c9454fc-be64-4d04-9d08-bfb0099c0686" />
+
+
 
 A simple tool that automates your Claude tasks. You give it a list of things to do, it sends them to Claude one by one, and marks them as done when Claude finishes.
 
@@ -27,7 +30,7 @@ The system watches your terminal to see when Claude starts working and when it's
 
 1. **Have Claude running** - Open Claude in your browser or terminal
 2. **Put your tasks in tasks.txt** - One task per line, or as a JSON array
-3. **Run Night Writer.exe** - Double-click it
+3. **Run Night Writer v1.1.exe** - Double-click it
 4. **Click "Refresh Windows"** - It'll find your terminal
 5. **Select your terminal** - Click on it in the list
 6. **Click "Start Automation"** - That's it
